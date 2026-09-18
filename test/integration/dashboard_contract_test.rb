@@ -151,7 +151,7 @@ class DashboardContractTest < ActionDispatch::IntegrationTest
     5.times { create(:security_event, ip_address: ban.ip_address) }
     statements = capture_selects { get "/beskar/banned_ips/#{ban.id}" }
     assert_response :success
-    assert_equal 1, statements.count { |sql| sql.include?('FROM "users"') }
+    assert_equal 1, statements.count { |sql| sql.include?("FROM #{User.quoted_table_name}") }, statements.join("\n")
   end
 
   test "only implemented controllers have public engine routes" do

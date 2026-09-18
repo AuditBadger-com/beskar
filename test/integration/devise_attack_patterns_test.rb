@@ -271,7 +271,8 @@ class DeviseAttackPatternsTest < ActionDispatch::IntegrationTest
     # Verify different email addresses were attempted
     attempted_emails = events.pluck(:attempted_email).compact.uniq
     assert_equal ["[FILTERED]"], attempted_emails
-    assert_equal 5, Beskar::SecurityState.where("key LIKE ?", "rate:enforce:account:%:credentials:%").count
+    account_keys = Beskar::SecurityState.arel_table[:key].matches("rate:enforce:account:%:credentials:%")
+    assert_equal 5, Beskar::SecurityState.where(account_keys).count
 
     # Verify risk scores reflect enumeration pattern
     enum_events = events.where("user_agent LIKE ?", "%Enum%")

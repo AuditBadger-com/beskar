@@ -41,7 +41,7 @@ module Beskar
     def extend_ban!(additional_time = nil)
       validate_duration!(additional_time)
       SecurityState.mutate("ban:#{ip_address}", ttl: 1.day) do
-        reload
+        reload(lock: true)
         apply_extension(additional_time)
         save!
       end
@@ -58,7 +58,10 @@ module Beskar
         ip_address = IPAddr.new(ip_address.to_s).to_s
 
         SecurityState.mutate("ban:#{ip_address}", ttl: 1.day) do
-          banned_ip = find_or_initialize_by(ip_address: ip_address)
+          # The coordination lookup may establish a MySQL REPEATABLE READ
+          # snapshot before another worker commits. Locking the state row does
+          # not refresh that snapshot: read the ban with a current lock too.
+          banned_ip = lock.find_or_initialize_by(ip_address: ip_address)
           if banned_ip.persisted?
             banned_ip.permanent = true if permanent
             banned_ip.send(:apply_extension, duration)

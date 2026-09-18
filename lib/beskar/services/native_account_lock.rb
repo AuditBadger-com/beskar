@@ -60,9 +60,13 @@ module Beskar
       end
 
       def self.revoke_sessions!(user)
-        user.sessions.destroy_all
-        # destroy_all does not raise when a host callback throws :abort.
-        raise ActiveRecord::RecordNotDestroyed, "Account sessions could not be revoked" if user.sessions.exists?
+        sessions = user.sessions
+        # Bypass both a loaded association and MySQL's earlier transaction
+        # snapshot. Keep association removal and model destruction callbacks.
+        sessions.destroy(sessions.lock.to_a)
+        sessions.reset
+        # A host callback can abort removal. Verify against a current read too.
+        raise ActiveRecord::RecordNotDestroyed, "Account sessions could not be revoked" if sessions.lock.exists?
       end
 
       def self.with_session(user, request, generation: nil)

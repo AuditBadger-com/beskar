@@ -13,6 +13,15 @@ rows in deterministic order. Unique keys prevent duplicate state; optimistic
 locking and bounded retries handle concurrent-update conflicts, including SQLite
 write-lock contention. Retryable blocks must contain only database work.
 
+Ban mutation reads also lock the ban row. Under MySQL's default `REPEATABLE READ`,
+an earlier coordination lookup can establish a snapshot before another worker
+commits. Locking the coordination row does not refresh ordinary snapshot reads
+of other tables; [locking reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html)
+are required to preserve the latest violation count and expiry when extending a ban.
+Native session revocation likewise locks the current session rows and checks for
+remaining rows with a locking read, ignoring stale loaded associations while
+preserving host removal/destruction callbacks.
+
 `beskar_banned_ips` is authoritative for ban decisions. Each decision uses an
 indexed database query. Stale positive/negative cache entries, cache eviction,
 process restarts, and rolled-back ban writes do not change the result.
@@ -35,10 +44,18 @@ generations transactionally. Benchmark with the host application's traffic and p
 size. No fixed throughput or latency guarantee is asserted.
 
 Concurrency regressions exercise separate database connections. The PostgreSQL 17
-full-suite job passed in [CI run 35342475137](https://github.com/AuditBadger-com/beskar/actions/runs/35342475137).
-The MySQL 8.4 job failed during schema loading; the JSON-default and foreign-key
-fixes still need hosted confirmation. Production-load validation remains open.
-Local Docker access was denied, including outside the sandbox.
+full-suite job passed in [CI run 35346587142](https://github.com/AuditBadger-com/beskar/actions/runs/35346587142).
+That run confirmed the MySQL schema repairs, then exposed stale ban reads and two
+test SQL-quoting assumptions. These failures were reproduced against an isolated
+local MySQL 8.4.11 server; repeated concurrency runs also exposed stale session
+cleanup during native account locking. After repair, the full MySQL and SQLite
+suites each pass 849 tests / 4,619 assertions with three existing MaxMind-data
+skips (Ruby 4.0.7, seed `20260918`). The MySQL concurrency suite also passes ten
+seeds (`101` through `1010`, in increments of `101`). New instance-extension and
+stale-session-association regressions fail before their fixes and pass after them.
+Production-load validation and hosted confirmation of these latest fixes remain open.
+Local Docker access was denied, so MySQL ran with a project-local data directory
+and Unix socket, with TCP networking disabled; no system service was installed.
 `BESKAR_TEST_DATABASE_URL` selects an isolated test database; never
 point it at a production database (Rails test tasks can rebuild it).
 

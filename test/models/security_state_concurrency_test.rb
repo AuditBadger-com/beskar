@@ -59,6 +59,17 @@ class SecurityStateConcurrencyTest < ActiveSupport::TestCase
     assert_equal 20, Beskar::BannedIp.find_by!(ip_address: @ip).violation_count
   end
 
+  test "concurrent instance extensions reload the latest ban after coordination" do
+    ban = Beskar::BannedIp.ban!(@ip, reason: "test", duration: 1.hour)
+    original_expiry = ban.expires_at
+    concurrently do
+      independent_ban = Beskar::BannedIp.find(ban.id)
+      5.times { independent_ban.extend_ban!(1.hour) }
+    end
+    assert_equal 21, ban.reload.violation_count
+    assert_in_delta original_expiry.to_f + 20.hours, ban.expires_at.to_f, 0.001
+  end
+
   test "native session creation racing an account lock cannot leave an active session" do
     @native_user = create(:user)
     jobs = Queue.new

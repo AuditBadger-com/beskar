@@ -275,6 +275,18 @@ class AuthenticationAdmissionTest < ActionDispatch::IntegrationTest
     refute Session.exists?(session.id)
   end
 
+  test "native session revocation ignores a stale loaded session association" do
+    assert_empty @native_user.sessions.to_a
+    session = User.find(@native_user.id).sessions.create!
+    assert @native_user.sessions.loaded?
+
+    assert Beskar::Services::NativeAccountLock.lock!(@native_user, duration: 1.hour)
+
+    refute Session.exists?(session.id)
+    assert_empty @native_user.sessions.reload
+    refute Beskar::SecurityState.read(Beskar::Services::NativeAccountLock.key(@native_user))["session_cleanup_pending"]
+  end
+
   test "aborted native session destruction also requires cleanup before unlocking" do
     session = @native_user.sessions.create!
     Session.any_instance.stubs(:destroy).returns(false)
