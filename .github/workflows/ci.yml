@@ -48,7 +48,7 @@ jobs:
         run: bin/rails db:test:prepare && bin/rails test
 
   browser:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -68,13 +68,53 @@ jobs:
         with:
           chrome-version: stable
           install-chromedriver: true
+          install-dependencies: true
+      - name: Allow the downloaded Chrome binary to use its sandbox
+        env:
+          BESKAR_BROWSER_BINARY: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          # Ubuntu restricts user namespaces for downloaded Chrome for Testing.
+          # Allow only this binary; keep Chrome's sandbox and global policy on.
+          chrome_binary=$(readlink -f "$BESKAR_BROWSER_BINARY")
+          test -x "$chrome_binary"
+          sudo tee /etc/apparmor.d/beskar-ci-chrome > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile beskar-ci-chrome "$chrome_binary" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/beskar-ci-chrome
+      - name: Verify Chrome starts before running browser tests
+        env:
+          BESKAR_BROWSER_BINARY: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          mkdir -p tmp/browser
+          profile_dir=$(mktemp -d "$RUNNER_TEMP/beskar-chrome.XXXXXX")
+          timeout 30s "$BESKAR_BROWSER_BINARY" --headless --enable-logging=stderr \
+            --user-data-dir="$profile_dir" --dump-dom about:blank \
+            > tmp/browser/preflight.html 2> tmp/browser/chrome-stderr.log || {
+              cat tmp/browser/chrome-stderr.log
+              exit 1
+            }
       - name: Run dashboard browser regressions
         env:
           RAILS_ENV: test
           PARALLEL_WORKERS: 1
           BESKAR_BROWSER_BINARY: ${{ steps.chrome.outputs.chrome-path }}
           BESKAR_BROWSER_DRIVER: ${{ steps.chrome.outputs.chromedriver-path }}
+          BESKAR_BROWSER_LOG: ${{ github.workspace }}/tmp/browser/chromedriver.log
         run: bin/rails db:test:prepare && bin/rails test test/system/dashboard_test.rb
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-diagnostics
+          path: |
+            tmp/browser/
+            test/dummy/tmp/screenshots/
+          if-no-files-found: ignore
+          retention-days: 3
 
   database-adapters:
     runs-on: ubuntu-latest

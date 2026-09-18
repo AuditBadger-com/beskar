@@ -206,9 +206,11 @@ mise exec -- env PARALLEL_WORKERS=1 bin/rails test test/system/dashboard_test.rb
 Use an installed Chrome/Chromium and matching ChromeDriver. Optional
 `BESKAR_BROWSER_BINARY` and `BESKAR_BROWSER_DRIVER` select their paths; otherwise the
 harness discovers local binaries/driver, with Selenium's usual fallback when no
-driver is installed. Each test gets a fresh browser process. The local run uses
-Chromium/ChromeDriver 152.0.7977.82 and Ruby 4.0.6. It does not use a production
-account, copy the project runtime, or disable Chromium's sandbox.
+driver is installed. `BESKAR_BROWSER_LOG` enables verbose ChromeDriver logs at the
+specified path, appended across tests. Each test gets a fresh browser process.
+The tests do not use a production account, copy the project runtime, or disable
+Chromium's sandbox. Failed startup does not trigger another browser launch for
+screenshots or teardown.
 
 Coverage includes UTC edits with multiple browser zones and DST-boundary dates,
 microsecond preservation, server-relative presets with a skewed browser clock,
@@ -219,9 +221,14 @@ CSRF protection. Browser console checks reject script/CSP errors (excluding a
 missing favicon and the deliberately tested validation response's HTTP 422).
 Screenshot inspection supplemented functional checks.
 
-CI now includes a separate browser job with a
-[matching Chrome/driver setup](https://github.com/browser-actions/setup-chrome).
-That hosted job has not been executed here. Other browsers, full strict-style CSP,
+CI includes a separate Ubuntu 24.04 browser job with a
+[matching Chrome/driver setup](https://github.com/browser-actions/setup-chrome)
+and system dependencies. A per-binary AppArmor rule permits the downloaded
+Chrome to use its sandbox without disabling global user-namespace restrictions.
+A headless startup check runs before the suite. The `browser-diagnostics` artifact
+retains startup stderr, verbose driver logs, and failure screenshots for three days.
+The previous hosted run failed before session creation; this runner fix still
+needs hosted confirmation. Other browsers, full strict-style CSP,
 mobile/accessibility review, arbitrary host layouts/authentication integrations,
 Turbo Frames/Streams, and transactional stale-form protection remain unverified
 or out of scope for this batch. No new database migration is required for batch

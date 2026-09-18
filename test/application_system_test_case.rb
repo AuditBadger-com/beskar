@@ -11,15 +11,25 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
     .map { |directory| File.join(directory, "chromedriver") }.find { |path| File.executable?(path) }
   Selenium::WebDriver::Chrome::Service.driver_path = driver_path if driver_path
 
-  driven_by :selenium, using: :headless_chrome, screen_size: [1440, 1200] do |options|
+  driver_options = {}
+  if (log_path = ENV["BESKAR_BROWSER_LOG"].presence)
+    FileUtils.mkdir_p(File.dirname(log_path))
+    driver_options[:service] = Selenium::WebDriver::Service.chrome(
+      path: driver_path, log: log_path, args: ["--verbose", "--append-log"]
+    )
+  end
+
+  driven_by :selenium, using: :headless_chrome, screen_size: [1440, 1200], options: driver_options do |options|
     binary = ENV["BESKAR_BROWSER_BINARY"] || %w[/usr/bin/chromium /usr/bin/google-chrome].find { |path| File.executable?(path) }
     options.binary = binary if binary
     options.add_option("goog:loggingPrefs", {browser: "ALL"})
   end
 
   setup do
-    page.driver.browser.manage.window.size = Selenium::WebDriver::Dimension.new(1440, 1200)
     @original_forgery_protection = Beskar::ApplicationController.allow_forgery_protection
+    @browser_started = false
+    page.driver.browser.manage.window.size = Selenium::WebDriver::Dimension.new(1440, 1200)
+    @browser_started = true
     Beskar::ApplicationController.allow_forgery_protection = true
     Beskar.configure do |config|
       config.authenticate_admin = ->(_) { true }
@@ -29,7 +39,12 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
 
   teardown do
     Beskar::ApplicationController.allow_forgery_protection = @original_forgery_protection
-    page.driver.quit # Isolate clock, timezone, Turbo, and script-disable state.
+    # Do not launch another browser while cleaning up a failed startup.
+    page.driver.quit if @browser_started
+  end
+
+  def take_failed_screenshot
+    super if @browser_started
   end
 
   private
