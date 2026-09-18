@@ -221,6 +221,17 @@ CSRF protection. Browser console checks reject script/CSP errors (excluding a
 missing favicon and the deliberately tested validation response's HTTP 422).
 Screenshot inspection supplemented functional checks.
 
+Native form submissions now wait for the destination URL before checking the
+success notice. Scoped notice checks also wait for same-URL redirects, such as
+bulk unban. This avoids reading the outgoing document during navigation: in
+[CI run 35353219531](https://github.com/AuditBadger-com/beskar/actions/runs/35353219531),
+ChromeDriver 153 reported `Node with given id does not belong to the document`
+while the update itself succeeded. A delayed-submit regression with matching
+text in the outgoing page fails without the destination wait and passes with it.
+The export test similarly waits for the export URL before checking the response.
+With Chrome/ChromeDriver 153.0.8010.52 and mise Ruby 4.0.7, all 11 browser tests
+(118 assertions) pass with seeds `42702`, `101`, `202`, `303`, and `20260918`.
+
 CI includes a separate Ubuntu 24.04 browser job with a
 [matching Chrome/driver setup](https://github.com/browser-actions/setup-chrome)
 and system dependencies. A per-binary AppArmor rule permits the downloaded
@@ -229,8 +240,9 @@ Startup is verified by the Selenium suite itself. The standalone `--dump-dom`
 preflight hung with Chrome for Testing 153.0.8010.52, reproduced locally even
 though all ten browser tests passed with that exact browser/driver pair.
 The `browser-diagnostics` artifact retains verbose driver logs (including Chrome
-startup diagnostics) and failure screenshots for three days. The updated hosted
-job still needs confirmation. Other browsers, full strict-style CSP,
+startup diagnostics) and failure screenshots for three days. Browser startup now
+passes in hosted CI; the navigation-synchronization repair still needs hosted
+confirmation. Other browsers, full strict-style CSP,
 mobile/accessibility review, arbitrary host layouts/authentication integrations,
 Turbo Frames/Streams, and transactional stale-form protection remain unverified
 or out of scope for this batch. No new database migration is required for batch

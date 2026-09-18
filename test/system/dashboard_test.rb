@@ -7,6 +7,7 @@ class DashboardSystemTest < ApplicationSystemTestCase
     fill_in "Export reason", with: "Case 42: browser export"
     select "JSON", from: "Export format"
     click_button "Export"
+    assert_current_path "/beskar/security_events/export", ignore_query: true
     assert_text "export_probe"
     entry = Beskar::AdministrativeAction.order(:id).last
     assert_equal "audit_exported", entry.action
@@ -27,7 +28,7 @@ class DashboardSystemTest < ApplicationSystemTestCase
     page.execute_script("Date.now = () => 2208988800000")
     earliest = Time.current + 1.hour
     click_button "Ban IP Address"
-    assert_text "has been banned successfully"
+    assert_ban_notice %r{\A/beskar/banned_ips/\d+\z}, "has been banned successfully"
     ban = Beskar::BannedIp.find_by!(ip_address: "198.51.100.221")
     assert_operator ban.expires_at, :>=, earliest
     assert_operator ban.expires_at, :<=, Time.current + 1.hour
@@ -47,12 +48,38 @@ class DashboardSystemTest < ApplicationSystemTestCase
       assert_match(/2030-11-03T02:30/, find_field("Expiry Date/Time (UTC)").value)
       fill_in "Administrative reason", with: "Browser extension"
       click_button "Update Ban"
-      assert_text "has been updated"
+      assert_ban_notice "/beskar/banned_ips/#{ban.id}", "has been updated"
       assert_equal expiry + 1.hour, ban.reload.expires_at
       assert_equal 1, ban.violation_count
       assert_equal 1, Beskar::AdministrativeAction.where(target_id: ban.id).count
       assert_no_script_errors
     end
+  end
+
+  test "success checks wait for delayed native navigation instead of an outgoing notice" do
+    ban = create(:banned_ip, reason: "manual_ban", details: "Before review")
+    visit "/beskar/banned_ips/#{ban.id}/edit"
+    fill_in "Administrative reason", with: "Delayed navigation review"
+    fill_in "Additional Details", with: "After delayed review"
+    page.execute_script(<<~JS, find("form[data-beskar-ban-form]"))
+      const form = arguments[0];
+      const notice = document.createElement('div');
+      notice.className = 'alert alert-success';
+      notice.textContent = 'has been updated';
+      form.before(notice);
+      // Deliberately keep matching text in the outgoing document while the
+      // native submission is pending. Text alone must not signal completion.
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        setTimeout(() => HTMLFormElement.prototype.submit.call(form), 250);
+      }, { once: true });
+    JS
+
+    click_button "Update Ban"
+    assert_ban_notice "/beskar/banned_ips/#{ban.id}", "has been updated"
+    assert_equal "After delayed review", ban.reload.details
+    assert_equal 1, Beskar::AdministrativeAction.where(target_id: ban.id).count
+    assert_no_script_errors
   end
 
   test "temporary and permanent controls work under nonce-only script policy" do
@@ -66,15 +93,16 @@ class DashboardSystemTest < ApplicationSystemTestCase
     fill_in "Expiry Date/Time (UTC)", with: Time.utc(2031, 3, 9, 2, 30)
     fill_in "Administrative reason", with: "Temporary after review"
     click_button "Update Ban"
-    assert_text "has been updated"
+    assert_ban_notice "/beskar/banned_ips/#{ban.id}", "has been updated"
     refute ban.reload.permanent?
     assert_equal Time.utc(2031, 3, 9, 2, 30), ban.expires_at
     click_link "Edit", exact: true
+    assert_current_path "/beskar/banned_ips/#{ban.id}/edit"
     click_button "Make Permanent"
     assert_no_selector "#temporary-options", visible: true
     fill_in "Administrative reason", with: "Permanent after review"
     click_button "Update Ban"
-    assert_text "has been updated"
+    assert_ban_notice "/beskar/banned_ips/#{ban.id}", "has been updated"
     assert ban.reload.permanent?
     assert_nil ban.expires_at
     assert_no_script_errors
@@ -89,8 +117,7 @@ class DashboardSystemTest < ApplicationSystemTestCase
     assert_equal "2030-01-01T09:15:00.123", find_field("Expiry Date/Time (UTC)").value
     fill_in "Administrative reason", with: "Retain original expiry"
     click_button "Update Ban"
-    assert_current_path "/beskar/banned_ips/#{ban.id}"
-    assert_text "has been updated"
+    assert_ban_notice "/beskar/banned_ips/#{ban.id}", "has been updated"
     assert_equal expiry, ban.reload.expires_at
     assert_equal "Case ABC: reviewed activity", ban.reason
     assert_no_script_errors
@@ -103,6 +130,7 @@ class DashboardSystemTest < ApplicationSystemTestCase
     choose "duration_86400"
     fill_in "Administrative reason", with: "Validation retry"
     click_button "Ban IP Address"
+    assert_current_path "/beskar/banned_ips"
     assert_selector ".alert-danger", text: "must be a valid individual IP address"
     assert find_field("duration_86400").checked?
     assert_equal "", find_field("Custom Expiry Date/Time (UTC)").value
@@ -111,7 +139,7 @@ class DashboardSystemTest < ApplicationSystemTestCase
     fill_in "IP Address", with: "198.51.100.225"
     earliest = Time.current + 24.hours
     click_button "Ban IP Address"
-    assert_text "has been banned successfully"
+    assert_ban_notice %r{\A/beskar/banned_ips/\d+\z}, "has been banned successfully"
     ban = Beskar::BannedIp.find_by!(ip_address: "198.51.100.225")
     assert_operator ban.expires_at, :>=, earliest
     assert_operator ban.expires_at, :<=, Time.current + 24.hours
@@ -132,7 +160,7 @@ class DashboardSystemTest < ApplicationSystemTestCase
     assert_equal 2, Beskar::BannedIp.where(id: bans.map(&:id)).count
     assert_empty Beskar::AdministrativeAction.all
     accept_confirm { click_button "Unban Selected" }
-    assert_text "2 ban(s) unbanned"
+    assert_ban_notice "/beskar/banned_ips", "2 ban(s) unbanned"
     assert_empty Beskar::BannedIp.where(id: bans.map(&:id))
     entries = Beskar::AdministrativeAction.all
     assert_equal 2, entries.count
@@ -158,15 +186,17 @@ class DashboardSystemTest < ApplicationSystemTestCase
     load_host_turbo
     page.execute_script("window.beskarNavigationProbe = true")
     click_link "Edit", exact: true
+    assert_current_path "/beskar/banned_ips/#{ban.id}/edit"
     assert_selector "h3", text: "Edit IP Ban"
     assert_nil page.evaluate_script("window.beskarNavigationProbe")
     load_host_turbo
     fill_in "Administrative reason", with: "Turbo loaded review"
     fill_in "Additional Details", with: "Reviewed exactly once"
     click_button "Update Ban"
-    assert_text "has been updated"
+    assert_ban_notice "/beskar/banned_ips/#{ban.id}", "has been updated"
     assert_equal 1, Beskar::AdministrativeAction.where(target_id: ban.id).count
     page.go_back
+    assert_current_path "/beskar/banned_ips/#{ban.id}/edit"
     assert_selector "h3", text: "Edit IP Ban"
     click_button "+1 Hour"
     assert find_field("Expiry Date/Time (UTC)").value.present?
@@ -181,17 +211,28 @@ class DashboardSystemTest < ApplicationSystemTestCase
     choose "Permanent Ban"
     fill_in "Administrative reason", with: "No scripts review"
     click_button "Ban IP Address"
-    assert_text "has been banned successfully"
+    assert_ban_notice %r{\A/beskar/banned_ips/\d+\z}, "has been banned successfully"
     ban = Beskar::BannedIp.find_by!(ip_address: "198.51.100.224")
     assert ban.permanent?
     click_link "Unban", exact: true
     assert_selector "h3", text: "Unban"
     fill_in "Reason for this administrative action", with: "No scripts reversal"
     click_button "Confirm unban"
-    assert_text "has been unbanned"
+    assert_ban_notice "/beskar/banned_ips", "has been unbanned"
     refute Beskar::BannedIp.exists?(ban.id)
     assert_equal 2, Beskar::AdministrativeAction.where(target_id: ban.id).count
   ensure
     page.driver.browser.execute_cdp("Emulation.setScriptExecutionDisabled", value: false)
+  end
+
+  private
+
+  def assert_ban_notice(path, message)
+    # A native submit can return before navigation begins. Do not read text
+    # from the outgoing document while Chrome replaces it (CI Chrome 153 race).
+    assert_current_path path
+    # This also waits for same-path redirects, such as bulk unban, where the
+    # URL alone cannot distinguish the old document from the completed action.
+    assert_selector ".alert-success", text: message
   end
 end
