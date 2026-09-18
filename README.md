@@ -1,6 +1,20 @@
 # Beskar
 
-**Beskar** is a comprehensive, Rails-native security engine designed to provide multi-layered, proactive protection for modern web applications. It defends against common threats, bot activity, and account takeovers without requiring external dependencies, integrating seamlessly into your application as a natural extension of the framework.
+Implementation repairs are tracked in [Repair status](docs/audits/repair-status.md). Read [Security hardening and rollout](docs/operations/security-hardening.md) before upgrading: session revocation, explicit admin permissions, export auditing, sealed configuration, and safer availability defaults change integration requirements. The original findings remain in [Original project review](docs/audits/project-review.md).
+
+Account deletion retains security events unchanged. Dashboard ban changes now require
+a trusted actor and reason, recorded in a new administrative-history table. See
+[Audit lifecycle](docs/guides/audit-lifecycle.md) for configuration and upgrade requirements.
+
+**Beskar** is a Rails-native security engine for authentication admission limits, risk-based account locking, IP bans, scanner-path detection, and an administrative audit dashboard. It requires a shared writer database for coordinated state and explicit host authentication integration. Its heuristic signals do not replace application authorization, input validation, or recovery delivery.
+
+## Documentation
+
+The [documentation index](docs/README.md) organizes current guides, operational
+contracts, audit findings, research, and archived reference material. Start with
+[configuration](docs/guides/configuration.md) and
+[authentication](docs/guides/authentication.md) for integration, or the
+[rollout checklist](docs/operations/security-hardening.md#rollout) for an upgrade.
 
 ## Screenshots
 
@@ -12,6 +26,7 @@
 
 ## Table of Contents
 
+- [Documentation](#documentation)
 - [Features](#features)
 - [Installation](#installation)
   - [Quick Start](#quick-start)
@@ -35,20 +50,30 @@
 
 ## Features
 
--   **Devise Integration:** Seamless integration with Devise authentication for automatic login tracking and security analysis.
--   **Risk-Based Account Locking:** Automatically locks accounts when authentication risk scores exceed configurable thresholds, preventing compromised account access.
--   **Smart Rate Limiting:** Distributed rate limiting using Rails.cache with IP-based and account-based throttling with exponential backoff.
--   **Brute Force Detection:** Advanced pattern recognition to detect single account attacks vs credential stuffing attempts, with automatic IP banning.
--   **IP Whitelisting:** Allow trusted IPs (office networks, partners, security scanners) to bypass blocking while maintaining full audit logs. Supports individual IPs and CIDR notation.
--   **Persistent IP Blocking:** Hybrid cache + database blocking system that survives application restarts. Auto-bans IPs after authentication abuse or excessive rate limiting violations.
--   **Web Application Firewall (WAF):** Real-time detection and blocking of vulnerability scanning attempts across 12 attack categories including Rails exception analysis (WordPress scans, WordPress static files, PHP admin panels, config files, path traversal, framework debug, CMS detection, common exploits, UnknownFormat, IP spoofing, InvalidType, RecordNotFound enumeration). Includes escalating ban durations, monitor-only mode, and configurable exclusion patterns.
--   **Security Event Tracking:** Comprehensive logging of authentication events with risk scoring and metadata extraction.
+For current reporting bands, search semantics, native-user presentation, UTC ban
+forms, script CSP/native-navigation behavior, and dashboard/export routes, see
+[Dashboard and search](docs/guides/dashboard-and-search.md).
+No versioned administration API is implemented.
+
+See [Configuration](docs/guides/configuration.md) for startup validation, supported
+strategies/providers, and opt-in host background analysis. Opt-in lock/reset email
+delivery and its host recovery requirements are documented in
+[Notifications and recovery](docs/guides/notifications-and-recovery.md).
+
+-   **Devise Integration:** Admission, risk assessment, optional audit tracking and durable session/remember-cookie revocation on protected models.
+-   **Risk-Based Account Locking:** Opt-in rules lock supported accounts at configured thresholds. Scores are heuristics, not proof of account takeover.
+-   **Rate Limiting:** Database-coordinated IP/account and opt-in global admission limits with enforced backoff deadlines. Supports any Rails.cache backend. See [authentication integration](docs/guides/authentication.md) for required host guards.
+-   **Authentication Pattern Helpers:** Bounded account/IP failure-history helpers; automatic background analysis requires an explicitly configured host job.
+-   **IP Whitelisting:** Trusted IPs/CIDRs bypass automatic blocking while configured observations remain enabled; optional audit delivery is not guaranteed.
+-   **Persistent IP Blocking:** Database-authoritative blocking across application restarts. WAF rules and opt-in request-wide quota-abuse escalation can create automatic bans.
+-   **Web Application Firewall (WAF):** Bounded, decoded-path scanner signatures and narrowly scoped Rails exception signals, with cumulative scores, escalating bans, monitor-only mode, and method/path/category exclusions. This is not a general SQL injection or XSS filter.
+-   **Security Event Tracking:** Filtered authentication/WAF evidence and required administrative history. Events survive account deletion; ordinary instance rewrites/deletes are rejected.
 -   **IP Geolocation:** MaxMind GeoLite2-City database integration for country/city location, coordinates, timezone, and enhanced risk scoring (configurable, database not included due to licensing).
--   **Geographic Anomaly Detection:** Haversine-based impossible travel detection and location-based risk assessment.
--   **Advanced Bot Detection:** Multi-layered defense using JavaScript challenges and invisible honeypots to filter out malicious bots while allowing legitimate ones.
+-   **Geographic Anomaly Detection:** Timestamped, admitted-login history and Haversine-based travel heuristics with explicit evidence. Mock locations do not trigger geographic risk; see [risk scoring](docs/guides/risk-scoring.md).
+-   **User-Agent Heuristics:** Browser and bot-like User-Agent signals contribute to authentication risk. Headers are spoofable; JavaScript challenges and honeypots are not implemented.
 -   **Modular Architecture:** Devise-specific code is isolated in separate services for maintainability and extensibility.
--   **Rails-Native Architecture:** Built as a mountable `Rails::Engine`, it leverages `ActiveJob` and `Rails.cache` for high performance and low overhead.
--   **Security Dashboard:** A mountable web interface for monitoring security events, managing IP bans, and viewing statistics. Features configurable authentication, real-time filtering, and export capabilities. See [Dashboard Authentication](#dashboard-authentication) section below.
+-   **Rails-Native Architecture:** Built as a mountable `Rails::Engine`, with Active Record-backed security state and optional caching for enrichment.
+-   **Security Dashboard:** A mountable web interface for monitoring security events, managing IP bans, and viewing statistics. Features configurable authentication, real-time filtering, and export capabilities. See [Dashboard Authentication](#dashboard-authentication-required) section below.
 
 ## Installation
 
@@ -85,7 +110,7 @@ bin/rails db:migrate
 
 **1. Configure Dashboard Authentication (Required)**
 
-Before using Beskar, you must configure authentication for the dashboard. See the [Dashboard Authentication](#dashboard-authentication) section below for details and examples.
+Before using Beskar, you must configure authentication for the dashboard. See the [Dashboard Authentication](#dashboard-authentication-required) section below for details and examples.
 
 **2. Enable WAF Monitoring**
 
@@ -124,29 +149,49 @@ Beskar.configure do |config|
     user = request.env['warden']&.authenticate(scope: :user)
     user&.admin?
   end
+  # REQUIRED: grant individual capabilities using your host permission store.
+  config.authorize_admin = ->(request, permission) do
+    user = request.env['warden']&.user(scope: :user)
+    user&.admin? && user.beskar_permissions.include?(permission.to_s)
+  end
+  # Adapt beskar_permissions to your host: read, manage_bans, export, read_audit.
+  # REQUIRED for dashboard writes and exports: identify the authenticated operator.
+  config.audit_actor = ->(request) do
+    user = request.env['warden']&.user(scope: :user)
+    "User:#{user.id}" if user&.admin?
+  end
 end
 ```
 
 **Why this is required:** Previous versions allowed unauthenticated access in development/test environments, which could lead to production security issues. Now, authentication must be explicitly configured for all environments to prevent accidental exposure.
+
+`audit_actor` is separate from authorization. Without it, authenticated reads work
+but ban mutations return 503. Every mutation also requires a nonblank `audit_reason`
+(at most 1,000 characters), supplied by the dashboard forms. Apply the history
+migration and adapt other authentication strategies to return a trusted opaque
+operator ID; never use request parameters or credentials as that identity. See
+[administrative history](docs/guides/audit-lifecycle.md).
 
 **Other Authentication Strategies:**
 
 ```ruby
 # Token-based authentication
 config.authenticate_admin = ->(request) do
-  request.headers['Authorization'] == "Bearer #{ENV['BESKAR_ADMIN_TOKEN']}"
+  token = ENV['BESKAR_ADMIN_TOKEN']
+  token.present? && Beskar::Services::RequestContext.secure_match?(request.headers['Authorization'], "Bearer #{token}")
 end
 
 # HTTP Basic Auth (uses controller method)
 config.authenticate_admin = ->(request) do
   authenticate_or_request_with_http_basic do |username, password|
-    username == ENV['BESKAR_USERNAME'] && password == ENV['BESKAR_PASSWORD']
+    Beskar::Services::RequestContext.secure_match?(username, ENV['BESKAR_USERNAME']) &&
+      Beskar::Services::RequestContext.secure_match?(password, ENV['BESKAR_PASSWORD'])
   end
 end
 
 # Cookie-based authentication (uses controller cookies)
 config.authenticate_admin = ->(request) do
-  cookies.signed[:admin_token] == ENV['BESKAR_ADMIN_TOKEN']
+  Beskar::Services::RequestContext.secure_match?(cookies.signed[:admin_token], ENV['BESKAR_ADMIN_TOKEN'])
 end
 
 # Development/Testing bypass (use with caution!)
@@ -212,7 +257,8 @@ Beskar.configure do |config|
     enabled: true,                    # Master switch - disables all tracking when false
     track_successful_logins: true,    # Track successful authentication events
     track_failed_logins: true,        # Track failed authentication attempts
-    auto_analyze_patterns: true       # Enable automatic pattern analysis for threats
+    auto_analyze_patterns: false,     # Opt in only with a host-owned Active Job
+    analysis_job: nil                 # Example: "SecurityReviewJob"; see docs/guides/configuration.md
   }
 
   # === Rate Limiting ===
@@ -228,6 +274,7 @@ Beskar.configure do |config|
       exponential_backoff: true
     },
     global_attempts: {
+      enabled: false,               # Opt-in: attackers can exhaust a shared login budget
       limit: 100,                   # System-wide limit
       period: 1.minute,
       exponential_backoff: false
@@ -263,9 +310,9 @@ Beskar.configure do |config|
   config.risk_based_locking = {
     enabled: false,                    # Master switch for risk-based locking
     risk_threshold: 75,                # Lock account if risk score >= this value (0-100)
-    lock_strategy: :devise_lockable,   # Strategy: :devise_lockable, :custom, :none
-    auto_unlock_time: 1.hour,          # Time until automatic unlock (if supported)
-    notify_user: true,                 # Send notification on lock (future feature)
+    lock_strategy: :devise_lockable,   # Strategy: :devise_lockable, :rails_auth, :none
+    auto_unlock_time: 1.hour,          # Native locks only; Devise owns unlock_in
+    notify_user: false,                # Opt-in email; configure notifications first
     log_lock_events: true              # Create security event for locks
   }
 
@@ -283,6 +330,9 @@ end
 ```
 
 ## Usage
+
+For current admission, account-lock, and recovery behavior—including the required
+Rails-native controller/session-reader upgrade—see [Authentication](docs/guides/authentication.md).
 
 > **Note:** If you haven't already, see the [Add to Your User Model](#add-to-your-user-model) section in Quick Start for setting up `SecurityTrackable`.
 
@@ -324,8 +374,8 @@ Beskar.configure do |config|
     enabled: true,                     # Enable the feature
     risk_threshold: 75,                # Lock when risk >= 75
     lock_strategy: :devise_lockable,   # Use Devise's lockable module
-    auto_unlock_time: 1.hour,          # Automatic unlock after 1 hour
-    notify_user: true,                 # Log notification intent
+    auto_unlock_time: 1.hour,          # Native locks only; configure Devise's unlock_in separately
+    notify_user: false,                # Opt-in email; see docs/guides/notifications-and-recovery.md
     log_lock_events: true              # Create security events
   }
 end
@@ -333,37 +383,24 @@ end
 
 **How it works:**
 
-- After each successful authentication, Beskar calculates a risk score (0-100) based on:
-  - Geographic anomalies (impossible travel, country changes)
-  - Device fingerprints (suspicious user agents, bot signatures)
-  - Login patterns (velocity, time of day, recent failures)
-  - IP reputation and geolocation risk
-
-- **Adaptive Learning:** The system learns from user behavior:
-  - After 2+ successful logins from an IP, that location becomes "established"
-  - If a user unlocks and logs in successfully, that pattern is trusted
-  - Risk scores are reduced to 30% for established patterns (capped at 25)
-  - This prevents repeated locks after users validate their login context
+- Each authentication assessment records a score (0–100), named factors, and evidence: timestamped geographic observations, unverified User-Agent claims, application-local mobile hours, and recent account failures.
+- Repeated IP use and unlock events do not establish verified trust. The former automatic risk discount and geographic bypass have been removed.
 
 - If the risk score meets or exceeds the configured threshold, the account is automatically locked
-- The user session is terminated immediately to prevent access
-- A security event is logged with the lock reason and risk details (always logged for audit trail)
-- The account remains locked until manually unlocked or the auto-unlock time expires (if supported)
+- Confirmed locks reject the current attempt and revoke prior Devise sessions/remember cookies. Unlock does not resurrect them. `immediate_signout` defaults true; legacy false no longer bypasses a lock. Unrelated accounts remain signed in.
+- Optional audit events record lock details; missing audit rows do not change enforcement.
+- Devise controls its own unlock policy; Rails-native locks use Beskar's `auto_unlock_time` and persistent session guards.
 
-**Example Adaptive Flow:**
-1. User travels to new location → High risk (85) → Account locked
-2. User unlocks account → Validates legitimacy
-3. User logs in from same location → Pattern established → Risk reduced to 25 → Login succeeds ✅
-4. Future logins from this location → Normal risk → No more locks
-
-See `ADAPTIVE_LEARNING.md` for detailed documentation.
+See [Risk scoring](docs/guides/risk-scoring.md) for factor weights, bounded history, provider
+behavior, and rollout limitations. Scores are heuristics, not calibrated
+probabilities; validate the corrected inputs in monitor mode before enforcement.
 
 **Lock Reasons:**
 
 The system identifies specific reasons for locking:
 - `:impossible_travel` - Login from location requiring impossible travel speed
 - `:suspicious_device` - Bot signature or suspicious user agent detected
-- `:geographic_anomaly` - Country change or high-risk location
+- `:geographic_anomaly` - Changed known country
 - `:high_risk_authentication` - General high-risk authentication pattern
 
 **Manual Lock/Unlock Operations:**
@@ -484,13 +521,13 @@ if Beskar::Services::IpWhitelist.whitelisted?(request.ip)
   # IP is trusted - allow but log activity
 end
 
-# Clear whitelist cache after config changes
+# Optional compatibility method; configuration changes are detected automatically.
 Beskar::Services::IpWhitelist.clear_cache!
 ```
 
 ### Web Application Firewall (WAF)
 
-Beskar's WAF uses a **score-based blocking system with exponential decay** to intelligently detect and block vulnerability scanning attempts across 12 attack categories:
+Beskar's WAF uses a **score-based blocking system with exponential decay** for scanner-path signatures and selected Rails exceptions. See [the matching and privacy contract](docs/guides/audit-and-waf.md) for canonicalization, exclusions, and limitations.
 
 **Attack Categories Detected:**
 1. **WordPress Scans** (High: 80 points) - `/wp-admin`, `/wp-login.php`, `/wp-content/*.php`, `/xmlrpc.php`
@@ -501,31 +538,31 @@ Beskar's WAF uses a **score-based blocking system with exponential decay** to in
 6. **Framework Debug** (Medium: 60 points) - `/rails/info/routes`, `/__debug__`, `/telescope`
 7. **CMS Detection** (Medium: 60 points) - `/joomla`, `/drupal`, `/magento`
 8. **Common Exploits** (Critical: 95 points) - `/shell.php`, `/c99.php`, `/webshell`
-9. **ActionController::UnknownFormat** (Medium: 60 points) - Detects requests for unusual formats like `/users/1.exe`, `/api/data.bat` that trigger Rails format exceptions, indicating potential scanning
-10. **ActionDispatch::RemoteIp::IpSpoofAttackError** (Critical: 95 points) - Detects IP spoofing attempts when conflicting IP headers are present
-11. **ActionDispatch::Http::MimeNegotiation::InvalidType** (Medium: 60 points) - Detects invalid MIME type requests like `GET "../../../../../../../../etc/passwd{{"` that indicate scanner activity
-12. **ActiveRecord::RecordNotFound** (Low: 30 points) - Detects potential record enumeration scans like `/admin/users/999999`, with configurable exclusions to prevent false positives
+9. **Rails Format Paths** (Medium: 60 points) - Selected resource/extension signatures such as `/users/1.exe`, plus exact executable `format` query values
+10. **Record Scanning Paths** (Low: 30 points) - Selected large-ID and scanner-name path signatures
+11. **Rails Exceptions** - `UnknownFormat` and `InvalidType` (60), `RecordNotFound` (30), and `IpSpoofAttackError` (95). Ordinary Rails exceptions require independent path/format evidence by default; IP-spoof exceptions require safe resolved attribution in middleware. Exceptions alone can be scored by explicitly opting into `exception_detection: :all`.
 
 **How Score-Based Blocking Works:**
 
 Instead of counting violations (1, 2, 3...), Beskar tracks a **cumulative risk score** that decays over time:
 
-- Each violation adds points based on severity (Critical=95, High=80, Medium=60, Low=30)
+- Each middleware pass records at most one violation, using the highest matched path severity (Critical=95, High=80, Medium=60, Low=30); a downstream exception does not add a second charge
 - Violations **decay exponentially** based on severity (critical threats persist longer)
 - IP is blocked when cumulative score reaches threshold (default: 150 points)
-- Lower-severity violations decay faster, reducing false positives from legitimate 404s
+- Lower-severity violations decay faster; ordinary 404s do not add points by default, but signature-matching legitimate paths still can
 
 **Example Scenarios:**
 ```ruby
-# Scenario 1: Legitimate user hitting 404s
-10 × RecordNotFound (30 points each) = 300 cumulative
-BUT: Low severity decays with 15-minute half-life
-→ Score drops quickly, no ban triggered
+# Scenario 1: Ordinary missing records, no matching scanner signature
+# exception_detection: :suspicious (default)
+10 × RecordNotFound = no WAF points
+# Opting into :all changes this: ten rapid failures can cross the ban threshold.
 
 # Scenario 2: Attacker scanning config files
-2 × /.env access (95 points each) = 190 points
-→ Exceeds threshold (150) → Immediate ban
-→ Critical severity persists for 6 hours
+2 × /.env access close together (95 points each) ≈ 190 points
+→ Exceeds threshold (150) → Ban when enforcement and auto-block are enabled
+→ One request alone is below the default threshold
+→ Critical severity has a 6-hour half-life within the configured retention window
 
 # Scenario 3: Mixed attack pattern
 1 × WordPress scan (80) + 1 × Config access (95) = 175
@@ -655,17 +692,19 @@ end
 
 ### IP Blocking and Banning
 
-Beskar uses a hybrid cache + database blocking system that persists across application restarts.
+Beskar uses indexed database ban checks. All workers must share the same authoritative database. Cache eviction, cache outages, and stale cache values cannot change ban enforcement.
 
 **Automatic IP Banning Thresholds:**
 
 | Trigger | Threshold | Time Window | Ban Duration | Configurable |
 |---------|-----------|-------------|--------------|--------------|
-| **Failed Authentication** | 10 attempts | 1 hour | 1 hour (escalating) | Via rate_limiting config |
-| **Rate Limit Violations** | 5 violations | 1 hour | 1 hour (escalating) | Via rate_limiting config |
-| **WAF Violations** | 3 violations | 1 hour | 1 hour (escalating) | Via waf[:block_threshold] |
+| **Authentication attempt limit** | Configured IP limit (default 10) | Configured period (default 1 hour) | HTTP 429 until the actual retry deadline | Via rate_limiting config |
+| **Rate Limit Violations** | 5 denied requests | Fixed 1 hour window | Adds 1 hour to a temporary ban | Fixed middleware policy |
+| **WAF Violations** | Cumulative score (default 150) | Configured window with optional decay | Score-based durations or permanent | Via waf configuration |
 
-> **Note:** All ban durations escalate on repeat offenses: 1h → 6h → 24h → 7d → permanent
+Explicit extensions without a duration escalate to 6h, 24h, 7d, then permanent.
+Extensions with a duration add that duration; already permanent bans remain permanent.
+Monitor mode does not create automatic bans.
 
 **Manual IP Management:**
 
@@ -719,16 +758,11 @@ Beskar::BannedIp.where(reason: 'rate_limit_abuse')
 removed_count = Beskar::BannedIp.cleanup_expired!
 ```
 
-**Preload cache on startup:**
+**State cleanup:**
 
-The cache is automatically preloaded when your app starts, but you can manually trigger it:
-
-```ruby
-# In config/initializers/beskar.rb (optional - happens automatically)
-Rails.application.config.after_initialize do
-  Beskar::BannedIp.preload_cache!
-end
-```
+Schedule `bin/rails beskar:cleanup_security_state` to reclaim expired coordination
+rows. Audit-event retention is separate. Ban cache preloading is no longer required;
+`Beskar::BannedIp.preload_cache!` remains a compatibility no-op.
 
 ### Security Events and Monitoring
 
@@ -841,16 +875,19 @@ Security events are logged to the `beskar_security_events` table for analysis an
 | Framework Debug | Medium | `/rails/info/routes`, `/__debug__`, `/telescope` | 60 |
 | CMS Detection | Medium | `/joomla`, `/drupal`, `/magento` | 60 |
 | Common Exploits | **Critical** | `/shell.php`, `/c99.php`, `/webshell` | **95** |
-| UnknownFormat Exception | Medium | `/users/1.exe`, `/api/data.bat` | 60 |
+| Rails Format Paths | Medium | `/users/1.exe`, `/reports?format=exe` | 60 |
+| Record Scanning Paths | Low | `/account/999999` | 30 |
 | IP Spoofing Exception | **Critical** | Conflicting IP headers | **95** |
-| Invalid MIME Type Exception | Medium | `GET "../../../../etc/passwd{{"` | 60 |
-| RecordNotFound Exception | Low | `/admin/users/999999` | 30 |
+| UnknownFormat / InvalidType Exceptions | Medium | Requires path/format evidence by default | 60 |
+| RecordNotFound Exception | Low | Requires path/format evidence by default | 30 |
 
-**Pattern matching is:**
-- Case-insensitive
-- Works on full path including query strings
-- Detects URL-encoded variants
-- Can match multiple patterns per request
+**Pattern matching:**
+
+- Uses an at-most-8-KiB path with up to two percent-decoding passes; backslashes become slashes and dot segments are retained.
+- Uses case-insensitive matching for most signatures, with explicit root/segment boundaries.
+- Ignores arbitrary query text and request bodies; only the exact `format` query key is examined.
+- Can match several rules but charges once per middleware pass; ordinary `.well-known` endpoints are not signatures.
+- Supports explicit method/path/category exclusions. `exception_detection` defaults to `:suspicious`; `:all` opts into broad exception scoring and `:none` disables exception scoring.
 
 ## Security Best Practices
 
@@ -954,10 +991,10 @@ end
 
 ### Issue: Legitimate users being blocked
 
-**Solution:** Add their IP to whitelist or reduce WAF `block_threshold`:
+**Solution:** Review matching rules in monitor mode, add narrow exclusions, or raise the cumulative score threshold:
 
 ```ruby
-config.waf[:block_threshold] = 5  # Increase from default 3
+config.waf[:score_threshold] = 250  # Increase from default 150; not a violation count
 ```
 
 Or whitelist specific IPs:
@@ -992,50 +1029,25 @@ Beskar::BannedIp.cleanup_expired!
 
 ### Issue: Performance concerns
 
-**Solution:** Beskar uses cache-first architecture. Ensure cache is configured:
-
-```ruby
-# config/environments/production.rb
-config.cache_store = :redis_cache_store, { url: ENV['REDIS_URL'] }
-```
-
-Check cache health:
-```ruby
-Rails.cache.read("test_key")  # Should work
-Beskar::BannedIp.preload_cache!  # Reload from database if needed
-```
+**Solution:** Measure database query latency, connection-pool contention, and global
+counter throughput. Redis is not required and cannot replace the authoritative
+database. See [state-storage trade-offs](docs/operations/state-storage.md).
 
 ## Migration from Previous Versions
 
-If upgrading from a version without WAF/IP blocking features:
-
-```bash
-# Run new migrations
-rails db:migrate
-
-# Preload cache with existing bans (if any)
-rails runner "Beskar::BannedIp.preload_cache!"
-
-# Test in development first
-RAILS_ENV=development rails server
-
-# Review logs for any issues
-tail -f log/development.log | grep Beskar
-```
+Copy engine migrations with `bin/rails beskar:install:migrations`, then run
+`bin/rails db:migrate` before starting new workers. Drain old cache-based workers:
+mixed versions do not share counters. Existing cache counters are not imported.
+Review legacy bans and schedule state cleanup as described in
+[the upgrade notes](docs/operations/state-storage.md#upgrade).
 
 ## Performance Characteristics
 
-- **Whitelist check**: O(n) where n = whitelist size, cached, < 1ms
-- **Banned IP check**: O(1) cache lookup, < 1ms
-- **Rate limit check**: O(1) cache lookup, < 1ms
-- **WAF analysis**: O(m) where m = number of patterns, < 5ms
-- **Total middleware overhead**: Typically < 10ms per request
-
-**Scalability:**
-- Handles 1000s of requests/second
-- Cache-first architecture minimizes database queries
-- Efficient pattern matching with compiled regexes
-- Parallel test execution: 352 tests run in < 3 seconds
+Ordinary requests read indexed ban state. Request-wide IP quota checks are opt-in. Authentication
+attempts update applicable counters transactionally; WAF violations update per-IP
+history. The global counter is disabled by default; enabling it serializes authentication accounting. No fixed
+requests-per-second or latency guarantee is asserted; benchmark the deployed
+database and workload.
 
 ## Development
 

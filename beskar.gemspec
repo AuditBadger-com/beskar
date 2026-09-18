@@ -6,10 +6,8 @@ Gem::Specification.new do |spec|
   spec.authors = ["Maciej Litwiniuk"]
   spec.email = ["maciej@litwiniuk.net"]
   spec.homepage = "https://humadroid.io/beskar"
-  spec.summary = "An all-in-one security engine for Rails providing WAF, bot detection, and account takeover prevention."
-  spec.description = "Rails Security Shield is a comprehensive, Rails-native security engine designed to provide multi-layered protection for modern web applications. It actively defends against common threats by integrating a powerful Web Application Firewall (WAF) to block attacks like SQLi and XSS, an advanced bot detection system using JavaScript challenges and honeypots, and robust account takeover prevention to stop brute-force and credential stuffing attacks.
-
-Built as a mountable Rails Engine, it leverages core framework features like ActiveJob and Rails.cache to ensure high performance and minimal external dependencies. It includes a real-time dashboard for monitoring security events, giving you immediate insight into the threats your application faces. Drop it in, configure it, and get enterprise-grade security that feels like a natural extension of Rails."
+  spec.summary = "A Rails security engine for authentication limits, risk-based locks, IP bans, and audit events."
+  spec.description = "Beskar is a mountable Rails engine with database-coordinated authentication admission limits, risk-based account locks, persistent IP bans, scanner-path signatures, and an administrative security dashboard. It supports Devise and explicit Rails-native authentication integration, optional MaxMind enrichment, User-Agent risk heuristics, and monitor-only operation. It does not implement general SQL injection or XSS filtering, JavaScript challenges, or honeypots."
   spec.license = "MIT"
 
   # Prevent pushing this gem to RubyGems.org. To allow pushes either set the "allowed_push_host"
@@ -18,10 +16,11 @@ Built as a mountable Rails Engine, it leverages core framework features like Act
 
   spec.metadata["homepage_uri"] = spec.homepage
   spec.metadata["source_code_uri"] = "https://github.com/humadroid-io/beskar"
+  spec.metadata["documentation_uri"] = "https://github.com/humadroid-io/beskar/blob/master/docs/README.md"
   spec.metadata["changelog_uri"] = "https://github.com/humadroid-io/beskar/blob/master/CHANGELOG.md"
 
   spec.files = Dir.chdir(File.expand_path(__dir__)) do
-    Dir["{app,config,db,lib}/**/*", "MIT-LICENSE", "Rakefile", "README.md", "CHANGELOG.md"]
+    Dir["{app,config,db,lib}/**/*", "docs/**/*.md", "MIT-LICENSE", "Rakefile", "README.md", "CHANGELOG.md"]
   end
 
   spec.add_dependency "rails", ">= 8.0.0"

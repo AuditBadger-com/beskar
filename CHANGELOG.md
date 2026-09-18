@@ -2,6 +2,10 @@
 
 All notable changes to Beskar will be documented in this file.
 
+The entries below include historical behavior. For the current contract and
+upgrade requirements, use the [documentation index](docs/README.md) and
+[repair status](docs/audits/repair-status.md).
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -14,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Use `config.monitor_only = true/false` at the configuration root level instead
   - The method `Beskar.configuration.waf_monitor_only?` has been **removed**
   - Use `Beskar.configuration.monitor_only?` instead
-  - See [BREAKING_CHANGES.md](BREAKING_CHANGES.md) for detailed migration guide
+  - See [Current upgrade guidance](docs/operations/security-hardening.md) for detailed migration guide
 
 - **Dashboard authentication now required in all environments**
   - Previous behavior: Dashboard allowed access in development/test without authentication
@@ -46,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Configurable authentication via `config.authenticate_admin` proc
   - Rails 7+ compatible with built-in CSRF protection
   - Install generator for easy setup (`rails generate beskar:install`)
-  - Full documentation in [DASHBOARD.md](DASHBOARD.md)
+  - Full documentation in [Current dashboard guide](docs/guides/dashboard-and-search.md)
 - **WAF Rails Exception Detection** - Enhanced security through Rails exception analysis
   - Detects `ActionController::UnknownFormat` exceptions (e.g., `/users/1.exe`) as potential scanning attempts
   - Detects `ActionDispatch::RemoteIp::IpSpoofAttackError` as critical IP spoofing attacks
@@ -104,10 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Updated README with new configuration structure
-- Enhanced MONITOR_ONLY_MODE.md with examples of querying ban records
+- Enhanced docs/operations/monitor-only-mode.md with examples of querying ban records
 - Added migration guide in BREAKING_CHANGES.md
-- Created PROJECT_DOCUMENTATION.md for development reference
-- Updated PROJECT_DOCUMENTATION.md with comprehensive dashboard authentication section
+- Created docs/archive/project-documentation.md for development reference
+- Updated docs/archive/project-documentation.md with comprehensive dashboard authentication section
   - Documented authentication flow and architecture
   - Added configuration examples and design principles
   - Included test coverage details
@@ -127,7 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 When upgrading between versions with breaking changes:
 
-1. Read the [BREAKING_CHANGES.md](BREAKING_CHANGES.md) file
+1. Read the [Current upgrade guidance](docs/operations/security-hardening.md) file
 2. Update your configuration according to the migration guide
 3. Run any new migrations: `rails db:migrate`
 4. Test in development/staging before deploying to production

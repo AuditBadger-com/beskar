@@ -1,4 +1,16 @@
-# Beskar Project Documentation
+# Archived Beskar project overview
+
+This overview predates the September 2026 remediation. Its cache and enforcement
+descriptions are historical. Consult [State storage](../operations/state-storage.md) for the
+current coordination contract, [Authentication](../guides/authentication.md) for current
+admission/session integration, [Risk scoring](../guides/risk-scoring.md) for scored evidence
+and removal of implicit trust discounts, [Audit data and WAF](../guides/audit-and-waf.md) for current
+capture/export and matching behavior, [Dashboard and search](../guides/dashboard-and-search.md)
+for current reporting/search/routes and UTC/CSP/browser behavior, [Configuration](../guides/configuration.md) for validation
+and supported capabilities, [Notifications and recovery](../guides/notifications-and-recovery.md)
+for opt-in delivery/host recovery, [Audit lifecycle](../guides/audit-lifecycle.md) for retained
+events and administrative history, and [Repair status](../audits/repair-status.md) for verified
+fixes and open findings. Local verification uses mise default Ruby 4.0.6.
 
 ## Quick Reference for Coding Agents
 
@@ -22,8 +34,8 @@ This document provides a comprehensive overview of the Beskar security engine pr
 - **Major Change**: Monitor-only mode refactored to top-level configuration
 - **Breaking Change**: `config.waf[:monitor_only]` → `config.monitor_only`
 - **Key Feature**: Ban records now created even in monitor-only mode for verification
-- **Migration Required**: See [BREAKING_CHANGES.md](BREAKING_CHANGES.md)
-- **Full Changelog**: See [CHANGELOG.md](CHANGELOG.md)
+- **Migration Required**: See [Current upgrade guidance](../operations/security-hardening.md)
+- **Full Changelog**: See [CHANGELOG.md](../../CHANGELOG.md)
 
 ### Key Dependencies
 - `rails` >= 8.0.0
@@ -343,7 +355,8 @@ Beskar.configure do |config|
   #
   # Example 2: Simple token-based authentication
   # config.authenticate_admin = ->(request) do
-  #   request.headers['Authorization'] == "Bearer #{ENV['BESKAR_ADMIN_TOKEN']}"
+  #   token = ENV['BESKAR_ADMIN_TOKEN']
+  #   token.present? && Beskar::Services::RequestContext.secure_match?(request.headers['Authorization'], "Bearer #{token}")
   # end
   #
   # Example 3: For development/testing only (NOT for production!)
@@ -354,13 +367,14 @@ Beskar.configure do |config|
   # Example 4: HTTP Basic Auth (uses controller method)
   # config.authenticate_admin = ->(request) do
   #   authenticate_or_request_with_http_basic do |username, password|
-  #     username == ENV['BESKAR_USERNAME'] && password == ENV['BESKAR_PASSWORD']
+  #     Beskar::Services::RequestContext.secure_match?(username, ENV['BESKAR_USERNAME']) &&
+  #       Beskar::Services::RequestContext.secure_match?(password, ENV['BESKAR_PASSWORD'])
   #   end
   # end
   #
   # Example 5: Cookie-based authentication (uses controller cookies)
   # config.authenticate_admin = ->(request) do
-  #   cookies.signed[:admin_token] == ENV['BESKAR_ADMIN_TOKEN']
+  #   Beskar::Services::RequestContext.secure_match?(cookies.signed[:admin_token], ENV['BESKAR_ADMIN_TOKEN'])
   # end
 
   # ============================================================================
@@ -640,6 +654,6 @@ Beskar::Services::RateLimiter.check_ip_rate_limit('192.168.1.1')
 ## Support & Resources
 - GitHub: https://github.com/humadroid-io/beskar
 - Homepage: https://humadroid.io/beskar
-- Changelog: [CHANGELOG.md](CHANGELOG.md)
-- Breaking Changes: [BREAKING_CHANGES.md](BREAKING_CHANGES.md)
+- Changelog: [CHANGELOG.md](../../CHANGELOG.md)
+- Breaking Changes: [Current upgrade guidance](../operations/security-hardening.md)
 - Author: Maciej Litwiniuk (maciej@litwiniuk.net)
