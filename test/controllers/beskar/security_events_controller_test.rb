@@ -15,7 +15,7 @@ module Beskar
 
     teardown do
       # Reset configuration after each test
-      Beskar.configuration = Beskar::Configuration.new
+      Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
     end
 
     # Authentication Tests
@@ -200,7 +200,7 @@ module Beskar
     test "exports to CSV" do
       events = create_list(:security_event, 3)
 
-      get "/beskar/security_events/export.csv"
+      get "/beskar/security_events/export.csv", headers: {"X-Beskar-Audit-Reason" => "Export regression"}
 
       assert_response :success
       assert_equal "text/csv", response.content_type
@@ -214,7 +214,7 @@ module Beskar
       high_risk = create(:security_event, risk_score: 80)
       create(:security_event, risk_score: 20)
 
-      get "/beskar/security_events/export.csv", params: {risk_level: "high"}
+      get "/beskar/security_events/export.csv", headers: {"X-Beskar-Audit-Reason" => "Export regression"}, params: {risk_level: "high"}
 
       assert_response :success
       csv_content = response.body
@@ -224,7 +224,7 @@ module Beskar
     test "exports to JSON" do
       create_list(:security_event, 2)
 
-      get "/beskar/security_events/export.json"
+      get "/beskar/security_events/export.json", headers: {"X-Beskar-Audit-Reason" => "Export regression"}
 
       assert_response :success
       # JSON response should be parseable
@@ -305,7 +305,7 @@ module Beskar
 
       assert_response :success
       # Export links should exist
-      assert_select 'a[href*="export"]'
+      assert_select 'form[action*="export"] input[name="audit_reason"][required]'
     end
 
     test "includes pagination controls when needed" do
@@ -416,7 +416,10 @@ module Beskar
 
       assert_response :success
       # Export links should be available
-      assert_select 'a[href*="export"]'
+      assert_select 'form[action*="export"]' do
+        assert_select 'input[name="event_type"][value="login_failure"]'
+        assert_select 'input[name="risk_level"][value="high"]'
+      end
     end
 
     private

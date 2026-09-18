@@ -1,69 +1,97 @@
 module Beskar
   module Controllers
-    # Controller concern for tracking Rails 8 authentication events
-    #
-    # Usage in SessionsController:
-    #   class SessionsController < ApplicationController
-    #     include Beskar::Controllers::SecurityTracking
-    #
-    #     def create
-    #       if user = User.authenticate_by(params.permit(:email_address, :password))
-    #         track_authentication_success(user)
-    #         start_new_session_for user
-    #         redirect_to after_authentication_url
-    #       else
-    #         track_authentication_failure(User, :user)
-    #         redirect_to new_session_path, alert: "Try another email address or password."
-    #       end
-    #     end
-    #   end
+    # Rails-native integration:
+    # before_action -> { admit_authentication_attempt(User, :user) }, only: :create
+    # After User.authenticate_by succeeds:
+    # return unless complete_authentication(user) { start_new_session_for(user) }
+    # Existing-session readers must also call user.beskar_access_allowed?(request).
     module SecurityTracking
       extend ActiveSupport::Concern
 
       private
 
-      # Track successful authentication for a user
-      # This should be called after verifying credentials but before creating session
+      # Run before password verification. Credentials are identity fields only;
+      # passwords must never be included in a persistent counter key.
+      def admit_authentication_attempt(model, scope = :user, credentials: nil)
+        values = params[scope].is_a?(ActionController::Parameters) ? params[scope] : params
+        key = model.attribute_names.include?("email_address") ? :email_address : :email
+        credentials ||= {key => values[key]}
+        user = model.find_by(credentials)
+        @beskar_authentication_attempt = Services::AuthenticationAttempt.reserve(request,
+          model: model, scope: scope, user: user, credentials: credentials, cache: true)
+        return true if @beskar_authentication_attempt.allowed?
+
+        model.track_failed_authentication(request, scope, attempt: @beskar_authentication_attempt)
+        render_authentication_response(@beskar_authentication_attempt.response)
+        false
+      rescue Services::AuthenticationAttempt::Unavailable, ActiveRecord::ActiveRecordError
+        render_authentication_response(Services::AuthenticationAttempt.unavailable_response)
+        false
+      end
+
+      # The preferred Rails-native API. Final audit persistence happens after the
+      # session guard, so a denied session is never learned as a successful login.
+      def complete_authentication(user)
+        return false unless user
+        attempt = native_authentication_attempt(user)
+        user.track_authentication_event(request, :success, attempt: attempt, persist: false)
+        if attempt.allowed?
+          admitted = user.with_beskar_session(request, generation: attempt.session_token) { yield }
+          attempt.deny!(:account_locked) unless admitted
+        end
+        if attempt.event
+          attempt.event.event_type = "authentication_blocked" unless attempt.allowed?
+          attempt.event.metadata = (attempt.event.metadata || {}).merge("authentication" => attempt.metadata)
+          if Beskar.configuration.track_successful_logins?
+            user.send(:persist_authentication_audit, attempt.event)
+            user.analyze_suspicious_patterns_async if attempt.allowed? && Beskar.configuration.auto_analyze_patterns?
+          end
+        end
+        render_authentication_response(attempt.response) unless attempt.allowed?
+        attempt.allowed?
+      rescue Services::AuthenticationAttempt::Unavailable, ActiveRecord::ActiveRecordError
+        render_authentication_response(Services::AuthenticationAttempt.unavailable_response)
+        false
+      end
+
+      # Compatibility API for custom integrations; callers must honor the boolean
+      # result and guard session creation. Prefer complete_authentication above.
       def track_authentication_success(user)
-        return unless user
-        return unless Beskar.configuration.track_successful_logins?
-
-        user.track_authentication_event(request, :success)
-        Beskar::Logger.info("Tracked successful authentication for user #{user.id}")
-      rescue => e
-        Beskar::Logger.error("Failed to track authentication success: #{e.message}")
+        return false unless user
+        attempt = native_authentication_attempt(user)
+        user.track_authentication_event(request, :success, attempt: attempt)
+        render_authentication_response(attempt.response) unless attempt.allowed?
+        attempt.allowed?
+      rescue Services::AuthenticationAttempt::Unavailable
+        render_authentication_response(Services::AuthenticationAttempt.unavailable_response)
+        false
       end
 
-      # Track failed authentication attempt
-      # This should be called when authentication fails
+      def native_authentication_attempt(user)
+        @beskar_authentication_attempt ||= Services::AuthenticationAttempt.reserve(request,
+          model: user.class, scope: user.class.name.underscore, user: user, cache: true)
+      end
+
       def track_authentication_failure(model_class, scope = :user)
-        return unless Beskar.configuration.track_failed_logins?
-
-        model_class.track_failed_authentication(request, scope)
-        Beskar::Logger.info("Tracked failed authentication for scope #{scope}")
-      rescue => e
-        Beskar::Logger.error("Failed to track authentication failure: #{e.message}")
+        model_class.track_failed_authentication(request, scope, attempt: @beskar_authentication_attempt)
       end
 
-      # Track logout event
-      def track_logout(user)
-        return unless user
-        return unless Beskar.configuration.security_tracking_enabled?
+      def render_authentication_response(response)
+        return if performed?
+        status, headers, body = response
+        headers.each { |name, value| self.response.set_header(name, value) }
+        render body: body.join, status: status
+      end
 
+      def track_logout(user)
+        return unless user && Beskar.configuration.security_tracking_enabled?
         user.security_events.create!(
-          event_type: "logout",
-          ip_address: request.ip,
-          user_agent: request.user_agent,
-          metadata: {
-            timestamp: Time.current.iso8601,
-            session_id: request.session.id,
-            request_path: request.path
-          },
-          risk_score: 0
+          event_type: "logout", ip_address: Services::RequestContext.ip(request),
+          user_agent: Services::RequestContext.text(request.user_agent), risk_score: 0,
+          metadata: {timestamp: Time.current.iso8601, request_path: Services::RequestContext.path(request)}
         )
-        Beskar::Logger.info("Tracked logout for user #{user.id}")
-      rescue => e
-        Beskar::Logger.error("Failed to track logout: #{e.message}")
+      rescue => error
+        Beskar::Logger.warn("Logout audit unavailable (#{error.class})")
       end
     end
   end

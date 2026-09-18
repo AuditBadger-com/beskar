@@ -80,15 +80,15 @@ class DeviseSecurityEdgeCasesTest < ActionDispatch::IntegrationTest
 
     assert_response :unprocessable_content
 
-    # Should create security event with valid email
+    # Should record the failure while honoring the host email filter.
     event = Beskar::SecurityEvent.where(
-      attempted_email: test_email,
+      attempted_email: "[FILTERED]",
       ip_address: ip
     ).order(id: :desc).first
 
     assert_not_nil event, "Should create security event for valid email"
     assert_equal "login_failure", event.event_type
-    assert_equal test_email, event.attempted_email
+    assert_equal "[FILTERED]", event.attempted_email
   end
 
   test "handles extremely long email addresses" do
@@ -110,10 +110,9 @@ class DeviseSecurityEdgeCasesTest < ActionDispatch::IntegrationTest
     # Should still create security event but handle long email gracefully
     event = Beskar::SecurityEvent.where(ip_address: worker_ip(30)).order(id: :desc).first
     assert_not_nil event, "SecurityEvent should be created for long email attempt"
-    # The attempted_email should be stored (possibly truncated)
+    # Even oversized email values honor the host's audit privacy policy.
     assert_not_nil event.attempted_email, "Email should be stored in attempted_email field"
-    # The original email was 1000 'a's + '@example.com' = 1011 characters
-    assert event.attempted_email.length >= 1000, "Email should maintain its length or be reasonably long"
+    assert_equal "[FILTERED]", event.attempted_email, "Host email privacy policy applies to long addresses too"
   end
 
   test "handles special characters and encoding in parameters" do
@@ -161,6 +160,7 @@ class DeviseSecurityEdgeCasesTest < ActionDispatch::IntegrationTest
     ]
 
     header_cases.each_with_index do |test_case, index|
+      previous_event_id = Beskar::SecurityEvent.maximum(:id) || 0
       post "/devise_users/sign_in", params: {
         devise_user: {
           email: "header#{index}@example.com",
@@ -172,7 +172,7 @@ class DeviseSecurityEdgeCasesTest < ActionDispatch::IntegrationTest
       assert_response :unprocessable_content, "Failed for #{test_case[:description]}"
 
       # Should create security event with available data
-      event = Beskar::SecurityEvent.where(attempted_email: "header#{index}@example.com").order(id: :desc).first
+      event = Beskar::SecurityEvent.where("id > ?", previous_event_id).order(id: :desc).first
       assert_not_nil event, "Should create security event for #{test_case[:description]}"
       assert_equal "login_failure", event.event_type
       # Should capture some IP address (might be localhost for missing headers)
@@ -284,11 +284,10 @@ class DeviseSecurityEdgeCasesTest < ActionDispatch::IntegrationTest
     # Devise returns 422 for invalid parameters but still shows the form
     assert_response :unprocessable_content
 
-    # Should create security event and flag as suspicious
+    # The wrong credential scope did not run an authentication strategy. Do not
+    # manufacture a failed login or account history from unrelated parameters.
     event = Beskar::SecurityEvent.where(ip_address: worker_ip(24)).order(id: :desc).first
-    assert_not_nil event, "Should create security event for suspicious parameters"
-    assert event.risk_score >= 10,
-      "Suspicious parameters should have elevated risk score (got #{event.risk_score})"
+    assert_nil event
   end
 
   test "handles logout without active session" do
@@ -353,7 +352,11 @@ class DeviseSecurityEdgeCasesTest < ActionDispatch::IntegrationTest
       # Should create security event with elevated risk for suspicious referrer
       event = Beskar::SecurityEvent.where(ip_address: ip).order(id: :desc).first
       assert event.risk_score >= 10, "Suspicious referrer should have some risk score"
-      assert_equal referrer, event.metadata["referer"]
+      if referrer.start_with?("http://", "https://")
+        assert_equal referrer, event.metadata["referer"]
+      else
+        assert_nil event.metadata["referer"]
+      end
     end
   end
 
@@ -372,6 +375,7 @@ class DeviseSecurityEdgeCasesTest < ActionDispatch::IntegrationTest
     ]
 
     spoofing_attempts.each_with_index do |forwarded_for, index|
+      previous_event_id = Beskar::SecurityEvent.maximum(:id) || 0
       # Use unique IP for each test to prevent cumulative WAF blocking
       post "/devise_users/sign_in", params: {
         devise_user: {
@@ -386,9 +390,8 @@ class DeviseSecurityEdgeCasesTest < ActionDispatch::IntegrationTest
       # Devise returns 422 for invalid parameters but still shows the form
       assert_response :unprocessable_content
 
-      # Explicitly order by id DESC to ensure we get the most recent event
-      # .last without explicit ordering can be flaky in parallel test execution
-      event = Beskar::SecurityEvent.where(attempted_email: "spoof#{index}@example.com").order(id: :desc).first
+      # Select evidence from this request, never an earlier loop iteration.
+      event = Beskar::SecurityEvent.where("id > ?", previous_event_id).order(id: :desc).first
       # Should record IP address
       assert_not_nil event.ip_address
       assert event.risk_score >= 30

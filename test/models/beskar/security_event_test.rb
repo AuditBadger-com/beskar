@@ -180,7 +180,7 @@ module Beskar
 
       event = create(:security_event, metadata: metadata)
       event.reload
-      assert_equal metadata, event.metadata
+      assert_equal metadata.merge("session_id" => "[FILTERED]"), event.metadata
     end
   end
 end

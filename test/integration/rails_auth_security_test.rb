@@ -31,7 +31,7 @@ class RailsAuthSecurityTest < ActionDispatch::IntegrationTest
     event = Beskar::SecurityEvent.last
     assert_equal "login_success", event.event_type
     assert_equal @user, event.user
-    assert_equal @user.email_address, event.attempted_email
+    assert_equal "[FILTERED]", event.attempted_email
     assert event.risk_score.present?
   end
 
@@ -47,8 +47,8 @@ class RailsAuthSecurityTest < ActionDispatch::IntegrationTest
 
     event = Beskar::SecurityEvent.last
     assert_equal "login_failure", event.event_type
-    assert_nil event.user
-    assert_equal "test@example.com", event.attempted_email
+    assert_equal @user, event.user
+    assert_equal "[FILTERED]", event.attempted_email
     assert event.risk_score.present?
     assert event.risk_score >= 10  # Base failure score
   end
@@ -134,7 +134,7 @@ class RailsAuthSecurityTest < ActionDispatch::IntegrationTest
     # Instead, we check the total failure events
     failure_count = Beskar::SecurityEvent.where(
       event_type: "login_failure",
-      attempted_email: @user.email_address
+      user: @user
     ).count
     assert failure_count >= 3, "Expected at least 3 failure events, got #{failure_count}"
   end
@@ -164,8 +164,11 @@ class RailsAuthSecurityTest < ActionDispatch::IntegrationTest
       }
     end
 
-    # Verify events were created
-    assert Beskar::SecurityEvent.where(event_type: "login_failure").count >= 10
+    # Only the first five requests verify credentials; later ones are denied by
+    # the account limit and are not mislabeled as password failures.
+    assert_equal 5, Beskar::SecurityEvent.where(event_type: "login_failure").count
+    assert_equal 5, Beskar::SecurityEvent.where(event_type: "authentication_blocked").count
+    assert_response :too_many_requests
   end
 
   test "established pattern reduces risk score" do
@@ -260,66 +263,16 @@ class RailsAuthSecurityTest < ActionDispatch::IntegrationTest
     Beskar.configuration.risk_based_locking[:enabled] = true
     Beskar.configuration.risk_based_locking[:risk_threshold] = 75
 
-    # Create 3 impossible travel events by simulating logins from different continents
-    # First: US login
-    @user.security_events.create!(
-      event_type: "login_success",
-      ip_address: "8.8.8.8", # US
-      user_agent: "TestAgent",
-      attempted_email: @user.email_address,
-      metadata: {
-        geolocation: {
-          country: "United States",
-          city: "Mountain View",
-          impossible_travel: false
-        }
-      },
-      risk_score: 10,
-      created_at: 1.hour.ago
-    )
-
-    # Second: Europe login (impossible travel - too fast)
-    @user.security_events.create!(
-      event_type: "login_success",
-      ip_address: "8.8.4.4", # Different location
-      user_agent: "TestAgent",
-      attempted_email: @user.email_address,
-      metadata: {
-        geolocation: {
-          country: "Germany",
-          city: "Berlin",
-          impossible_travel: true,
-          travel_distance_km: 8000,
-          travel_speed_kmh: 16000
-        }
-      },
-      risk_score: 95,
-      created_at: 30.minutes.ago
-    )
-
-    # Track current password
     original_password_digest = @user.password_digest
-
-    # Third: Asia login (another impossible travel)
-    # This should trigger emergency password reset
-    @user.security_events.create!(
-      event_type: "account_locked",
-      ip_address: "1.1.1.1", # Different location
-      user_agent: "TestAgent",
-      attempted_email: @user.email_address,
-      metadata: {
-        geolocation: {
-          country: "Japan",
-          city: "Tokyo",
-          impossible_travel: true,
-          travel_distance_km: 9000,
-          travel_speed_kmh: 18000
-        },
-        reason: :impossible_travel
-      },
-      risk_score: 100,
-      created_at: Time.current
-    )
+    # Three confirmed lock events, not a substring match on a false travel flag.
+    3.times do |index|
+      @user.security_events.create!(
+        event_type: "account_locked", ip_address: "203.0.113.#{index + 1}",
+        user_agent: "TestAgent", attempted_email: @user.email_address,
+        metadata: {reason: "impossible_travel", geolocation: {impossible_travel: true}},
+        risk_score: 95, created_at: (index + 1).minutes.ago
+      )
+    end
 
     # Manually trigger the emergency password reset check
     security_event = @user.security_events.last

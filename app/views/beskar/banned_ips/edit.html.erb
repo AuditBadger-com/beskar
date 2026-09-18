@@ -10,7 +10,8 @@
     <div class="card-subtitle">Modify ban settings for <%= @banned_ip.ip_address %></div>
   </div>
   <div class="card-body">
-    <%= form_with model: @banned_ip, url: banned_ip_path(@banned_ip), method: :patch, local: true do |f| %>
+    <%= form_with model: @banned_ip, url: banned_ip_path(@banned_ip), method: :patch, local: true, data: { beskar_ban_form: true } do |f| %>
+      <%= hidden_field_tag :expiry_precision, "milliseconds" %>
       <% if @banned_ip.errors.any? %>
         <div class="alert alert-danger">
           <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 0.5rem;">
@@ -47,11 +48,13 @@
               <span style="font-size: 13px; color: #697386;">
                 Expires in <%= distance_of_time_in_words(Time.current, @banned_ip.expires_at) %>
               </span>
-            <% else %>
+            <% elsif @banned_ip.expires_at %>
               <span class="badge badge-neutral">Expired</span>
               <span style="font-size: 13px; color: #697386;">
                 Expired <%= time_ago_in_words(@banned_ip.expires_at) %> ago
               </span>
+            <% else %>
+              <span class="badge badge-warning">Expiry required for a temporary ban</span>
             <% end %>
           </div>
         </div>
@@ -60,15 +63,7 @@
         <div class="form-group">
           <%= f.label :reason, "Ban Reason *" %>
           <%= f.select :reason,
-              options_for_select([
-                ['Rate Limit Abuse', 'rate_limit_abuse'],
-                ['Authentication Abuse', 'authentication_abuse'],
-                ['WAF Violation', 'waf_violation'],
-                ['Brute Force Attack', 'brute_force_attack'],
-                ['Suspicious Activity', 'suspicious_activity'],
-                ['Manual Ban', 'manual_ban'],
-                ['Other', 'other']
-              ], @banned_ip.reason),
+              options_for_select(ban_reason_options, @banned_ip.reason),
               { prompt: 'Select a reason...' },
               { required: true } %>
           <div style="font-size: 12px; color: #697386; margin-top: 0.25rem;">
@@ -82,13 +77,11 @@
           <div style="display: flex; flex-direction: column; gap: 0.5rem;">
             <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
               <%= f.radio_button :permanent, false,
-                  onchange: "toggleDurationFields()",
                   checked: !@banned_ip.permanent? %>
               <span style="font-weight: normal;">Temporary Ban</span>
             </label>
             <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
               <%= f.radio_button :permanent, true,
-                  onchange: "toggleDurationFields()",
                   checked: @banned_ip.permanent? %>
               <span style="font-weight: normal; color: #D32F2F;">Permanent Ban</span>
             </label>
@@ -101,27 +94,28 @@
         </div>
 
         <!-- Temporary Ban Options -->
-        <div id="temporary-options" style="<%= @banned_ip.permanent? ? 'display: none;' : '' %>">
+        <div id="temporary-options">
           <div class="form-group">
-            <%= f.label :expires_at, "Expiry Date/Time" %>
+            <%= f.label :expires_at, "Expiry Date/Time (UTC)" %>
             <%= f.datetime_field :expires_at,
-                value: @banned_ip.expires_at&.strftime('%Y-%m-%dT%H:%M'),
-                min: DateTime.now.strftime('%Y-%m-%dT%H:%M') %>
+                value: ban_expiry_input_value(@banned_ip.expires_at),
+                step: "0.001" %>
             <div style="font-size: 12px; color: #697386; margin-top: 0.25rem;">
-              Set when this ban should expire. Leave empty for default duration.
+              Enter the expiry in UTC, not your browser timezone. Temporary bans require an expiry.
             </div>
           </div>
 
           <!-- Quick Extension Options -->
           <div class="form-group">
             <label>Quick Extension</label>
+            <noscript><p>Quick buttons require JavaScript. You can enter the UTC expiry directly or select Permanent Ban above.</p></noscript>
             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem;">
-              <button type="button" onclick="extendBan(1)" class="btn btn-sm btn-secondary">+1 Hour</button>
-              <button type="button" onclick="extendBan(24)" class="btn btn-sm btn-secondary">+1 Day</button>
-              <button type="button" onclick="extendBan(168)" class="btn btn-sm btn-secondary">+7 Days</button>
-              <button type="button" onclick="extendBan(720)" class="btn btn-sm btn-secondary">+30 Days</button>
-              <button type="button" onclick="extendBan(2160)" class="btn btn-sm btn-secondary">+90 Days</button>
-              <button type="button" onclick="makePermanent()" class="btn btn-sm btn-danger">Make Permanent</button>
+              <button type="button" data-beskar-extend-hours="1" class="btn btn-sm btn-secondary">+1 Hour</button>
+              <button type="button" data-beskar-extend-hours="24" class="btn btn-sm btn-secondary">+1 Day</button>
+              <button type="button" data-beskar-extend-hours="168" class="btn btn-sm btn-secondary">+7 Days</button>
+              <button type="button" data-beskar-extend-hours="720" class="btn btn-sm btn-secondary">+30 Days</button>
+              <button type="button" data-beskar-extend-hours="2160" class="btn btn-sm btn-secondary">+90 Days</button>
+              <button type="button" data-beskar-make-permanent class="btn btn-sm btn-danger">Make Permanent</button>
             </div>
           </div>
         </div>
@@ -140,7 +134,7 @@
         <!-- Violation Count -->
         <div class="form-group">
           <%= f.label :violation_count, "Violation Count" %>
-          <%= f.number_field :violation_count, min: 0 %>
+          <%= f.number_field :violation_count, min: 1 %>
           <div style="font-size: 12px; color: #697386; margin-top: 0.25rem;">
             Current violation count: <%= @banned_ip.violation_count %>. Higher counts may result in longer bans for repeat offenders.
           </div>
@@ -183,77 +177,19 @@
           </div>
         </div>
 
+        <div class="form-group">
+          <%= label_tag :audit_reason, "Administrative reason *" %>
+          <%= text_area_tag :audit_reason, params[:audit_reason], required: true, maxlength: 1000, rows: 2 %>
+        </div>
+
         <!-- Submit Buttons -->
         <div style="display: flex; gap: 0.5rem;">
           <%= f.submit "Update Ban", class: "btn btn-primary" %>
           <%= link_to "Cancel", banned_ip_path(@banned_ip), class: "btn btn-secondary" %>
-          <%= link_to "Delete Ban", banned_ip_path(@banned_ip),
-              data: {
-                "turbo-method": "delete",
-                "turbo-confirm": "Are you sure you want to unban #{@banned_ip.ip_address}?"
-              },
+          <%= link_to "Delete Ban", review_banned_ip_path(@banned_ip, operation: "unban"),
               class: "btn btn-danger" %>
         </div>
       </div>
     <% end %>
   </div>
 </div>
-
-<script>
-  function toggleDurationFields() {
-    const isPermanent = document.querySelector('input[name="banned_ip[permanent]"]:checked').value === 'true';
-    const temporaryOptions = document.getElementById('temporary-options');
-
-    if (isPermanent) {
-      temporaryOptions.style.display = 'none';
-      document.getElementById('banned_ip_expires_at').value = '';
-    } else {
-      temporaryOptions.style.display = 'block';
-      // If switching from permanent to temporary, set a default expiry
-      if (!document.getElementById('banned_ip_expires_at').value) {
-        const defaultExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
-        document.getElementById('banned_ip_expires_at').value = defaultExpiry.toISOString().slice(0, 16);
-      }
-    }
-  }
-
-  function extendBan(hours) {
-    const expiresField = document.getElementById('banned_ip_expires_at');
-    let currentExpiry;
-
-    if (expiresField.value) {
-      currentExpiry = new Date(expiresField.value);
-    } else {
-      // Use current ban expiry or current time
-      <% if @banned_ip.expires_at %>
-        currentExpiry = new Date('<%= @banned_ip.expires_at.iso8601 %>');
-      <% else %>
-        currentExpiry = new Date();
-      <% end %>
-    }
-
-    // Add the specified hours
-    currentExpiry.setHours(currentExpiry.getHours() + hours);
-
-    // Update the field
-    expiresField.value = currentExpiry.toISOString().slice(0, 16);
-
-    // Show a visual feedback
-    const originalBg = expiresField.style.background;
-    expiresField.style.background = '#E8F5E9';
-    setTimeout(() => {
-      expiresField.style.background = originalBg;
-    }, 500);
-  }
-
-  function makePermanent() {
-    document.querySelector('input[name="banned_ip[permanent]"][value="true"]').checked = true;
-    toggleDurationFields();
-  }
-
-  // Initialize on page load
-  document.addEventListener('DOMContentLoaded', function() {
-    // Set initial state
-    toggleDurationFields();
-  });
-</script>

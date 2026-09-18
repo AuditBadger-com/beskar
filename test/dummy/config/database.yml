@@ -23,6 +23,10 @@ development:
 # re-generated from your development database when you run "rake".
 # Do not set this db to the same as development or production.
 test:
+<% if ENV["BESKAR_TEST_DATABASE_URL"].present? %>
+  url: <%= ENV.fetch("BESKAR_TEST_DATABASE_URL").to_json %>
+  pool: 20
+<% else %>
   <<: *default
   database: storage/test.sqlite3
   pool: 20
@@ -34,6 +38,7 @@ test:
     foreign_keys: true
     temp_store: MEMORY
     mmap_size: 67108864
+<% end %>
 
 # SQLite3 write its data on the local filesystem, as such it requires
 # persistent disks. If you are deploying to a managed service, you should

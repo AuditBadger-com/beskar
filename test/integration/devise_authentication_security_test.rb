@@ -96,7 +96,7 @@ class DeviseAuthenticationSecurityTest < ActionDispatch::IntegrationTest
     assert_equal "login_failure", event.event_type
     assert_nil event.user_id # No user for failed attempt
     assert_equal ip_address, event.ip_address
-    assert_equal @invalid_email, event.attempted_email
+    assert_equal "[FILTERED]", event.attempted_email
     assert_includes event.user_agent, "Macintosh"
     assert event.risk_score >= 10 # Failed attempts should have higher risk
   end
@@ -121,8 +121,8 @@ class DeviseAuthenticationSecurityTest < ActionDispatch::IntegrationTest
 
     event = Beskar::SecurityEvent.last
     assert_equal "login_failure", event.event_type
-    assert_nil event.user_id # Still no user association for failed attempt
-    assert_equal @user.email, event.attempted_email
+    assert_equal @user.id, event.user_id # Known targets are associated for account-based analysis.
+    assert_equal "[FILTERED]", event.attempted_email
     assert_equal ip_address, event.ip_address
   end
 

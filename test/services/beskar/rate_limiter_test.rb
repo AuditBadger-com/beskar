@@ -4,6 +4,7 @@ require_relative "../../beskar_test_base"
 class Beskar::Services::RateLimiterTest < BeskarTestBase
   def setup
     super
+    Beskar.configuration.rate_limiting[:global_attempts][:enabled] = true
     @request = mock_request
     @user = create(:devise_user)
     @rate_limiter = Beskar::Services::RateLimiter
@@ -61,18 +62,19 @@ class Beskar::Services::RateLimiterTest < BeskarTestBase
 
   test "should use exponential backoff for IP blocking" do
     ip = "192.168.1.3"
+    Beskar.configuration.rate_limiting[:ip_attempts][:period] = 1.second
 
     # First block - should have minimal retry_after
     10.times do
       @rate_limiter.send(:record_attempt, ip, :failure, nil)
     end
 
-    first_result = @rate_limiter.check_ip_rate_limit(ip)
+    request = mock_request(ip: ip)
+    first_result = @rate_limiter.check_authentication_attempt(request, :failure)
     first_retry_after = first_result[:retry_after]
 
     # Second block - should have longer retry_after
-    @rate_limiter.send(:record_attempt, ip, :failure, nil)
-    second_result = @rate_limiter.check_ip_rate_limit(ip)
+    second_result = @rate_limiter.check_authentication_attempt(request, :failure)
     second_retry_after = second_result[:retry_after]
 
     assert second_retry_after > first_retry_after

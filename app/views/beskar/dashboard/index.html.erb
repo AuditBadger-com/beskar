@@ -38,7 +38,7 @@
     <div class="stat-value" style="color: var(--primary);">
       <%= number_with_delimiter(@stats[:high_risk_events]) %>
     </div>
-    <div class="stat-change">Score > 60</div>
+    <div class="stat-change">Score &ge; <%= Beskar::RiskLevel::RANGES[:high].begin %></div>
   </div>
 
   <div class="stat-card">
@@ -46,7 +46,7 @@
     <div class="stat-value" style="color: #D32F2F;">
       <%= number_with_delimiter(@stats[:critical_threats]) %>
     </div>
-    <div class="stat-change">Score > 85</div>
+    <div class="stat-change">Score &ge; <%= Beskar::RiskLevel::RANGES[:critical].begin %></div>
   </div>
 </div>
 
@@ -172,11 +172,11 @@
                 <td>
                   <% if event.user %>
                     <div style="font-size: 13px;">
-                      <%= event.user.try(:email) || "User ##{event.user_id}" %>
+                      <%= audit_user_label(event) %>
                     </div>
                   <% elsif event.attempted_email %>
                     <div style="font-size: 13px; color: #697386;">
-                      <%= event.attempted_email %>
+                      <%= audit_user_label(event) %>
                     </div>
                   <% else %>
                     <span style="color: #C1C7D0;">-</span>

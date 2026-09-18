@@ -12,10 +12,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Install database client headers
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev default-libmysqlclient-dev
       - name: Set up Ruby
+        # mysql2 is a native test dependency; do not rely on runner-image headers.
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: 3.4
+          ruby-version: "4.0.6"
           bundler-cache: true
 
       - name: Lint code for consistent style
@@ -23,17 +26,100 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ruby: ["3.4", "4.0.6"]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Install database client headers
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev default-libmysqlclient-dev
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: 3.4
+          ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
 
       - name: Run tests
         env:
           RAILS_ENV: test
+        run: bin/rails db:test:prepare && bin/rails test
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Install database client headers
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev default-libmysqlclient-dev
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0.6"
+          bundler-cache: true
+      - name: Set up Chrome and matching driver
+        uses: browser-actions/setup-chrome@v2
+        id: chrome
+        with:
+          chrome-version: stable
+          install-chromedriver: true
+      - name: Run dashboard browser regressions
+        env:
+          RAILS_ENV: test
+          PARALLEL_WORKERS: 1
+          BESKAR_BROWSER_BINARY: ${{ steps.chrome.outputs.chrome-path }}
+          BESKAR_BROWSER_DRIVER: ${{ steps.chrome.outputs.chromedriver-path }}
+        run: bin/rails db:test:prepare && bin/rails test test/system/dashboard_test.rb
+
+  database-adapters:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - adapter: postgresql
+            url: postgresql://postgres:beskar_test@127.0.0.1:5432/beskar_test
+          - adapter: mysql2
+            url: mysql2://root:beskar_test@127.0.0.1:3306/beskar_test
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: beskar_test
+          POSTGRES_DB: beskar_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: beskar_test
+          MYSQL_DATABASE: beskar_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pbeskar_test"
+          --health-interval 5s --health-timeout 5s --health-retries 24
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Install database client headers
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev default-libmysqlclient-dev
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0.6"
+          bundler-cache: true
+      - name: Run full suite including separate-connection contention tests
+        env:
+          RAILS_ENV: test
+          PARALLEL_WORKERS: 1
+          BESKAR_TEST_DATABASE_URL: ${{ matrix.url }}
         run: bin/rails db:test:prepare && bin/rails test

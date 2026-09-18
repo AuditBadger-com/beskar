@@ -43,7 +43,7 @@ class SecurityTrackingBasicTest < BeskarTestBase
       ip_address: "10.0.0.1"
     })
     assert_nil event.user
-    assert_equal "wrong@example.com", event.attempted_email
+    assert_equal "[FILTERED]", event.attempted_email
     assert_risk_score_in_range(event, 10, 100)
   end
 
@@ -72,15 +72,10 @@ class SecurityTrackingBasicTest < BeskarTestBase
 
   test "rate limiter should block after limit exceeded" do
     ip = "192.168.1.51"
-    cache_key = "beskar:ip_attempts:#{ip}"
-    now = Time.current.to_i
-
-    # Directly add 10 attempts to cache to simulate limit being reached
-    window_data = {}
-    10.times do |i|
-      window_data[now - i] = 1
+    request = mock_request(ip: ip)
+    10.times do
+      Beskar::Services::RateLimiter.check_authentication_attempt(request, :failure)
     end
-    Rails.cache.write(cache_key, window_data, expires_in: 1.hour + 60)
 
     result = Beskar::Services::RateLimiter.check_ip_rate_limit(ip)
     assert_equal false, result[:allowed]

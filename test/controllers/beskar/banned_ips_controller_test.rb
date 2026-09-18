@@ -10,12 +10,13 @@ module Beskar
       # Setup authentication for tests
       Beskar.configure do |config|
         config.authenticate_admin = ->(request) { true }
+        config.audit_actor = ->(_) { "test:administrator" }
       end
     end
 
     teardown do
       # Reset configuration after each test
-      Beskar.configuration = Beskar::Configuration.new
+      Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
     end
 
     # Authentication Tests
@@ -232,7 +233,7 @@ module Beskar
     test "sorts by expires_at" do
       expires_soon = create(:banned_ip, expires_at: 1.day.from_now)
       expires_later = create(:banned_ip, expires_at: 7.days.from_now)
-      permanent = create(:banned_ip, expires_at: nil)
+      permanent = create(:banned_ip, permanent: true, expires_at: nil)
 
       get "/beskar/banned_ips", params: {sort: "expires_at", direction: "asc"}
 
@@ -273,14 +274,13 @@ module Beskar
     # Create Action Tests
     test "creates new banned IP" do
       assert_difference "Beskar::BannedIp.count", 1 do
-        post "/beskar/banned_ips", params: {
-          ban_type: "temporary",
-          duration: 86400,  # 24 hours in seconds
-          banned_ip: {
-            ip_address: "192.168.1.100",
-            reason: "Suspicious activity"
-          }
-        }
+        post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                            ban_type: "temporary",
+                                            duration: 86400,  # 24 hours in seconds
+                                            banned_ip: {
+                                              ip_address: "192.168.1.100",
+                                              reason: "Suspicious activity"
+                                            }}
       end
 
       assert_response :redirect
@@ -292,13 +292,12 @@ module Beskar
 
     test "validates IP address format" do
       assert_no_difference "Beskar::BannedIp.count" do
-        post "/beskar/banned_ips", params: {
-          ban_type: "temporary",
-          banned_ip: {
-            ip_address: "",  # Empty IP
-            reason: "Test"
-          }
-        }
+        post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                            ban_type: "temporary",
+                                            banned_ip: {
+                                              ip_address: "",  # Empty IP
+                                              reason: "Test"
+                                            }}
       end
 
       # Should either show error or redirect
@@ -309,13 +308,12 @@ module Beskar
       create(:banned_ip, ip_address: "192.168.1.100")
 
       # Attempting to create duplicate should fail or extend existing
-      post "/beskar/banned_ips", params: {
-        ban_type: "temporary",
-        banned_ip: {
-          ip_address: "192.168.1.100",
-          reason: "Duplicate attempt"
-        }
-      }
+      post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                          ban_type: "temporary",
+                                          banned_ip: {
+                                            ip_address: "192.168.1.100",
+                                            reason: "Duplicate attempt"
+                                          }}
 
       # Should either reject or handle gracefully
       assert_includes [422, 200, 302], response.status
@@ -323,13 +321,12 @@ module Beskar
 
     test "creates permanent ban when duration not specified" do
       assert_difference "Beskar::BannedIp.count", 1 do
-        post "/beskar/banned_ips", params: {
-          ban_type: "permanent",
-          banned_ip: {
-            ip_address: "192.168.1.100",
-            reason: "Permanent ban"
-          }
-        }
+        post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                            ban_type: "permanent",
+                                            banned_ip: {
+                                              ip_address: "192.168.1.100",
+                                              reason: "Permanent ban"
+                                            }}
       end
 
       ban = Beskar::BannedIp.last
@@ -338,14 +335,13 @@ module Beskar
 
     test "creates temporary ban with expiration" do
       assert_difference "Beskar::BannedIp.count", 1 do
-        post "/beskar/banned_ips", params: {
-          ban_type: "temporary",
-          duration: 172800,  # 48 hours in seconds
-          banned_ip: {
-            ip_address: "192.168.1.100",
-            reason: "Temporary ban"
-          }
-        }
+        post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                            ban_type: "temporary",
+                                            duration: 172800,  # 48 hours in seconds
+                                            banned_ip: {
+                                              ip_address: "192.168.1.100",
+                                              reason: "Temporary ban"
+                                            }}
       end
 
       ban = Beskar::BannedIp.last
@@ -369,12 +365,11 @@ module Beskar
     test "updates banned IP details" do
       ban = create(:banned_ip, reason: "Original reason")
 
-      patch "/beskar/banned_ips/#{ban.id}", params: {
-        banned_ip: {
-          reason: "Updated reason",
-          details: "Additional context"
-        }
-      }
+      patch "/beskar/banned_ips/#{ban.id}", params: {audit_reason: "Reviewed test case",
+                                                     banned_ip: {
+                                                       reason: "Updated reason",
+                                                       details: "Additional context"
+                                                     }}
 
       assert_response :redirect
       ban.reload
@@ -385,11 +380,10 @@ module Beskar
       ban = create(:banned_ip, expires_at: 1.day.from_now)
       ban.expires_at
 
-      patch "/beskar/banned_ips/#{ban.id}", params: {
-        banned_ip: {
-          extend_duration_hours: 24
-        }
-      }
+      patch "/beskar/banned_ips/#{ban.id}", params: {audit_reason: "Reviewed test case",
+                                                     banned_ip: {
+                                                       extend_duration_hours: 24
+                                                     }}
 
       # Should redirect or succeed
       assert_includes [200, 302], response.status
@@ -398,11 +392,10 @@ module Beskar
     test "validates update parameters" do
       ban = create(:banned_ip)
 
-      patch "/beskar/banned_ips/#{ban.id}", params: {
-        banned_ip: {
-          ip_address: ""  # Empty IP
-        }
-      }
+      patch "/beskar/banned_ips/#{ban.id}", params: {audit_reason: "Reviewed test case",
+                                                     banned_ip: {
+                                                       ip_address: ""  # Empty IP
+                                                     }}
 
       # Should handle validation
       ban.reload
@@ -414,19 +407,15 @@ module Beskar
       ban = create(:banned_ip)
 
       assert_difference "Beskar::BannedIp.count", -1 do
-        delete "/beskar/banned_ips/#{ban.id}"
+        delete "/beskar/banned_ips/#{ban.id}", params: {audit_reason: "Reviewed test case"}
       end
 
       assert_response :redirect
     end
 
     test "handles non-existent ban deletion gracefully" do
-      # Controller uses find which raises RecordNotFound
-      delete "/beskar/banned_ips/999999"
-      # If it gets here without exception, the controller handles it differently
-    rescue ActiveRecord::RecordNotFound
-      # This is expected behavior
-      assert true
+      delete "/beskar/banned_ips/999999", params: {audit_reason: "Reviewed test case"}
+      assert_response :not_found
     end
 
     # Batch Operations Tests
@@ -434,10 +423,9 @@ module Beskar
       bans = create_list(:banned_ip, 3)
 
       assert_difference "Beskar::BannedIp.count", -3 do
-        post "/beskar/banned_ips/bulk_action", params: {
-          bulk_action: "unban",
-          ip_ids: bans.map(&:id)
-        }
+        post "/beskar/banned_ips/bulk_action", params: {audit_reason: "Reviewed test case",
+                                                        bulk_action: "unban",
+                                                        ip_ids: bans.map(&:id)}
       end
 
       assert_response :redirect
@@ -448,10 +436,9 @@ module Beskar
     test "bulk makes bans permanent" do
       bans = create_list(:banned_ip, 2, expires_at: 1.day.from_now)
 
-      post "/beskar/banned_ips/bulk_action", params: {
-        bulk_action: "make_permanent",
-        ip_ids: bans.map(&:id)
-      }
+      post "/beskar/banned_ips/bulk_action", params: {audit_reason: "Reviewed test case",
+                                                      bulk_action: "make_permanent",
+                                                      ip_ids: bans.map(&:id)}
 
       assert_response :redirect
       follow_redirect!
@@ -467,43 +454,38 @@ module Beskar
     test "handles bulk action with no IPs selected" do
       create_list(:banned_ip, 2)
 
-      post "/beskar/banned_ips/bulk_action", params: {
-        bulk_action: "unban",
-        ip_ids: nil
-      }
+      post "/beskar/banned_ips/bulk_action", params: {audit_reason: "Reviewed test case",
+                                                      bulk_action: "unban",
+                                                      ip_ids: nil}
 
-      assert_response :redirect
-      # Should redirect back to index without performing action
+      assert_response :unprocessable_content
+      # Reject invalid selections without performing any action.
       assert_equal 2, Beskar::BannedIp.count
     end
 
     test "handles empty IP ids array" do
-      post "/beskar/banned_ips/bulk_action", params: {
-        bulk_action: "make_permanent",
-        ip_ids: []
-      }
+      post "/beskar/banned_ips/bulk_action", params: {audit_reason: "Reviewed test case",
+                                                      bulk_action: "make_permanent",
+                                                      ip_ids: []}
 
-      assert_response :redirect
-      # No error should be raised
+      assert_response :unprocessable_content
     end
 
     test "validates bulk action type" do
       ban = create(:banned_ip)
 
-      post "/beskar/banned_ips/bulk_action", params: {
-        bulk_action: "nonexistent_action",
-        ip_ids: [ban.id]
-      }
+      post "/beskar/banned_ips/bulk_action", params: {audit_reason: "Reviewed test case",
+                                                      bulk_action: "nonexistent_action",
+                                                      ip_ids: [ban.id]}
 
-      assert_response :redirect
-      # Should handle unknown action gracefully
+      assert_response :unprocessable_content
     end
 
     # Import/Export Tests
     test "exports banned IPs to CSV" do
       bans = create_list(:banned_ip, 3)
 
-      get "/beskar/banned_ips/export.csv"
+      get "/beskar/banned_ips/export.csv", headers: {"X-Beskar-Audit-Reason" => "Export regression"}
 
       assert_response :success
       assert_equal "text/csv", response.content_type
@@ -518,7 +500,7 @@ module Beskar
       create(:banned_ip, :active)
       create(:banned_ip, :expired)
 
-      get "/beskar/banned_ips/export.csv", params: {status: "active"}
+      get "/beskar/banned_ips/export.csv", headers: {"X-Beskar-Audit-Reason" => "Export regression"}, params: {status: "active"}
 
       assert_response :success
       # Should export successfully
@@ -596,14 +578,13 @@ module Beskar
 
     test "validates IP address format strictly" do
       # Note: Controller doesn't validate IP format, but SQL injection is prevented
-      post "/beskar/banned_ips", params: {
-        ban_type: "temporary",
-        duration: 86400,
-        banned_ip: {
-          ip_address: "'; DROP TABLE banned_ips; --",
-          reason: "SQL injection attempt"
-        }
-      }
+      post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                          ban_type: "temporary",
+                                          duration: 86400,
+                                          banned_ip: {
+                                            ip_address: "'; DROP TABLE banned_ips; --",
+                                            reason: "SQL injection attempt"
+                                          }}
 
       # Request handled gracefully - Rails parameter binding prevents SQL injection
       assert_includes [422, 200, 302], response.status

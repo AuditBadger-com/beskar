@@ -9,8 +9,37 @@ module Beskar
     before_action :ensure_csrf_token
 
     before_action :authenticate_admin!
+    before_action :authorize_admin_action!
 
     private
+
+    def authorize_admin_action!
+      permission = if controller_name == "administrative_actions"
+        :read_audit
+      elsif action_name == "export"
+        :export
+      elsif controller_name == "banned_ips" && %w[new create edit update destroy extend review bulk_action].include?(action_name)
+        :manage_bans
+      else
+        :read
+      end
+      callback = Beskar.configuration.authorize_admin
+      allowed = callback && instance_exec(request, permission, &callback) == true
+      head :forbidden unless performed? || allowed
+    rescue => error
+      Beskar::Logger.warn("Administrative authorization unavailable (#{error.class})")
+      head :service_unavailable unless performed?
+    end
+
+    def administrative_actor!
+      callback = Beskar.configuration.audit_actor
+      actor = instance_exec(request, &callback) if callback
+      raise Services::AdministrativeAudit::Unavailable unless Services::AdministrativeBans.valid_actor?(actor)
+      actor
+    rescue => error
+      Beskar::Logger.warn("Administrative actor unavailable (#{error.class})")
+      raise Services::AdministrativeAudit::Unavailable, "Administrative identity unavailable"
+    end
 
     # Override this method in your application to implement authentication
     # For example, you might want to use Devise's authenticate_admin! or
@@ -29,19 +58,20 @@ module Beskar
       # This gives the block access to controller methods like cookies, session,
       # authenticate_or_request_with_http_basic, etc.
       result = instance_exec(request, &Beskar.configuration.authenticate_admin)
+      return false if performed?
       return true if result
 
       handle_authentication_failure
       false
     rescue => e
-      Rails.logger.error "Beskar authentication error: #{e.message}"
+      Rails.logger.error "Beskar authentication error: #{e.class}"
       handle_authentication_failure
       false
     end
 
     def handle_missing_authentication_configuration
       # Log the configuration error for debugging, but return 404 to avoid revealing Beskar is installed
-      error_message = <<~MSG
+      error_message = <<~'MSG'
         Beskar authentication not configured!
 
         Configure Beskar.configuration.authenticate_admin in your initializer:
@@ -57,14 +87,16 @@ module Beskar
 
           # Example 2: HTTP Basic Auth (uses controller method)
           # authenticate_or_request_with_http_basic do |username, password|
-          #   username == ENV['BESKAR_USERNAME'] && password == ENV['BESKAR_PASSWORD']
+          #   Beskar::Services::RequestContext.secure_match?(username, ENV['BESKAR_USERNAME']) &&
+          #     Beskar::Services::RequestContext.secure_match?(password, ENV['BESKAR_PASSWORD'])
           # end
 
           # Example 3: Cookie-based auth (uses controller cookies)
-          # cookies.signed[:admin_token] == ENV['BESKAR_ADMIN_TOKEN']
+          # Beskar::Services::RequestContext.secure_match?(cookies.signed[:admin_token], ENV['BESKAR_ADMIN_TOKEN'])
 
           # Example 4: Simple token-based auth
-          # request.headers['Authorization'] == "Bearer #{ENV["BESKAR_ADMIN_TOKEN"]}"
+          # token = ENV['BESKAR_ADMIN_TOKEN']
+          # token.present? && Beskar::Services::RequestContext.secure_match?(request.headers['Authorization'], "Bearer #{token}")
 
           # Example 5: For development/testing (NOT for production!)
           # Rails.env.development? || Rails.env.test?
@@ -77,7 +109,7 @@ module Beskar
 
     def handle_authentication_failure
       # Return 404 to avoid revealing that Beskar is installed
-      render_404
+      render_404 unless performed?
     end
 
     def render_404
@@ -94,6 +126,11 @@ module Beskar
       time.in_time_zone.strftime("%Y-%m-%d %H:%M:%S %Z")
     end
     helper_method :format_timestamp
+
+    def ban_expiry_input_value(time)
+      time&.utc&.iso8601(3)&.delete_suffix("Z")
+    end
+    helper_method :ban_expiry_input_value
 
     # Helper method to format IP addresses with location if available
     def format_ip_with_location(ip, metadata = {})
@@ -113,20 +150,27 @@ module Beskar
 
     # Helper to determine risk level badge color
     def risk_level_class(risk_score)
-      return "neutral" unless risk_score
-
-      case risk_score
-      when 0..30
-        "success"
-      when 31..60
-        "warning"
-      when 61..85
-        "danger"
-      else
-        "critical"
-      end
+      RiskLevel::BADGES.fetch(RiskLevel.for(risk_score), "neutral")
     end
     helper_method :risk_level_class
+
+    def risk_level_color(risk_score)
+      RiskLevel::COLORS.fetch(RiskLevel.for(risk_score), "#697386")
+    end
+    helper_method :risk_level_color
+
+    def risk_level_label(risk_score)
+      level = RiskLevel.for(risk_score)
+      level ? "#{level.to_s.capitalize} Risk" : "Unknown Risk"
+    end
+    helper_method :risk_level_label
+
+    def audit_user_label(event)
+      attempted = event.attempted_email
+      Services::AuditData.user_email(event.user) || (Services::AuditData.field(:email, attempted, limit: 320) if attempted.present?) ||
+        (event.user_id ? "User ##{event.user_id}" : "-")
+    end
+    helper_method :audit_user_label
 
     # Helper to format event type for display
     def format_event_type(event_type)

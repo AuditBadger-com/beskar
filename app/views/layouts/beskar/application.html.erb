@@ -8,7 +8,7 @@
   <%= csp_meta_tag %>
 
   <!-- Embedded Styles (No external dependencies) -->
-  <style>
+  <style nonce="<%= content_security_policy_nonce %>">
     :root {
       --primary: #635BFF;
       --primary-dark: #5243CC;
@@ -384,6 +384,7 @@
     input[type="password"],
     input[type="number"],
     input[type="date"],
+    input[type="datetime-local"],
     select,
     textarea {
       width: 100%;
@@ -492,7 +493,7 @@
 
   <%= yield :head %>
 </head>
-<body>
+<body data-beskar-dashboard data-turbo="false">
   <div class="dashboard-container">
     <!-- Sidebar -->
     <aside class="sidebar">
@@ -529,6 +530,11 @@
             </svg>
             Banned IPs
           <% end %>
+        </div>
+
+        <div class="nav-section">
+          <%= link_to "Administrative Actions", administrative_actions_path,
+              class: "nav-link #{controller_name == 'administrative_actions' ? 'active' : ''}" %>
         </div>
 
         <div class="nav-section">
@@ -581,79 +587,6 @@
     </main>
   </div>
 
-  <%= javascript_tag nonce: true do %>
-    // Add active state to current nav link
-    document.addEventListener('DOMContentLoaded', function() {
-      // Handle nav link clicks
-      document.querySelectorAll('.nav-link').forEach(link => {
-        if (link.href === window.location.href) {
-          link.classList.add('active');
-        }
-      });
-
-      // Auto-dismiss alerts after 5 seconds
-      setTimeout(() => {
-        document.querySelectorAll('.alert').forEach(alert => {
-          alert.style.transition = 'opacity 0.5s';
-          alert.style.opacity = '0';
-          setTimeout(() => alert.remove(), 500);
-        });
-      }, 5000);
-
-      // Handle data-turbo-method links (Rails UJS replacement)
-      document.addEventListener('click', function(e) {
-        const link = e.target.closest('a[data-turbo-method]');
-        if (!link) return;
-
-        e.preventDefault();
-
-        const method = link.dataset.turboMethod || link.dataset['turbo-method'];
-        const confirm = link.dataset.turboConfirm || link.dataset['turbo-confirm'];
-
-        if (confirm && !window.confirm(confirm)) {
-          return;
-        }
-
-        const form = document.createElement('form');
-        form.method = 'POST';
-        form.action = link.href;
-        form.style.display = 'none';
-
-        // Add CSRF token
-        const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
-        const csrfParam = document.querySelector('meta[name="csrf-param"]').content;
-
-        if (csrfToken && csrfParam) {
-          const input = document.createElement('input');
-          input.type = 'hidden';
-          input.name = csrfParam;
-          input.value = csrfToken;
-          form.appendChild(input);
-        }
-
-        // Add method override for DELETE, PUT, PATCH
-        if (method && method.toLowerCase() !== 'post') {
-          const methodInput = document.createElement('input');
-          methodInput.type = 'hidden';
-          methodInput.name = '_method';
-          methodInput.value = method;
-          form.appendChild(methodInput);
-        }
-
-        // Add any URL parameters as form inputs
-        const url = new URL(link.href);
-        url.searchParams.forEach((value, key) => {
-          const input = document.createElement('input');
-          input.type = 'hidden';
-          input.name = key;
-          input.value = value;
-          form.appendChild(input);
-        });
-
-        document.body.appendChild(form);
-        form.submit();
-      });
-    });
-  <% end %>
+  <%= render "layouts/beskar/behavior" %>
 </body>
 </html>

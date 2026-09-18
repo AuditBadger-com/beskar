@@ -183,44 +183,35 @@ module Beskar
       # @param user_agent [String] The User-Agent string
       # @return [Integer] Risk score from 0 to 50
       def calculate_user_agent_risk(user_agent)
-        return 20 if user_agent.blank?
+        assess(user_agent)[:score]
+      end
 
-        risk = 0
-
-        # Bot detection adds significant risk
-        if bot?(user_agent)
-          risk += 30
-          Rails.logger.info "Bot detected: #{user_agent}, adding 30 risk"
-        end
-
-        # Suspicious patterns
-        if user_agent.length < 20 || user_agent.length > 500
-          risk += 15
-          Rails.logger.info "Suspicious length: #{user_agent.length}, adding 15 risk"
-        end
-
-        if user_agent.match?(/test|debug|script/i)
-          risk += 10
-          Rails.logger.info "Suspicious pattern: #{user_agent}, adding 10 risk"
-        end
-
-        if user_agent.count("()") > 3
-          risk += 5
-          Rails.logger.info "Suspicious pattern: #{user_agent}, adding 5 risk"
-        end
-
-        # Very old browsers might be suspicious
-        if (browser_info = detect_browser(user_agent))
-          if browser_info.match?(/Chrome (\d+)/) && $1.to_i < 90
-            risk += 5
-            Rails.logger.info "Suspicious browser: #{browser_info}, adding 5 risk"
-          elsif browser_info.match?(/Firefox (\d+)/) && $1.to_i < 90
-            risk += 5
-            Rails.logger.info "Suspicious browser: #{browser_info}, adding 5 risk"
+      # Evidence describes unverified User-Agent claims, never device identity.
+      # Do not log the raw header, which can contain attacker-controlled secrets.
+      def assess(user_agent)
+        original_length = user_agent.to_s.length
+        user_agent = RequestContext.text(user_agent)
+        info = detect(user_agent)
+        factors = []
+        if user_agent.blank?
+          factors << {name: "user_agent_missing", points: 20, evidence: {}}
+        else
+          factors << {name: "user_agent_bot", points: 30, evidence: {bot: true}} if info[:bot]
+          if original_length < 20 || original_length > 500
+            factors << {name: "user_agent_length", points: 15, evidence: {length: original_length}}
+          end
+          if user_agent.match?(/test|debug|script/i)
+            factors << {name: "user_agent_suspicious_pattern", points: 10, evidence: {}}
+          end
+          factors << {name: "user_agent_parentheses", points: 5, evidence: {count: user_agent.count("()")}} if user_agent.count("()") > 3
+          if (match = info[:browser].match(/\A(?:Chrome|Firefox) (\d+)/)) && match[1].to_i < 90
+            factors << {name: "old_browser", points: 5, evidence: {browser: info[:browser], legacy_major_cutoff: 90}}
           end
         end
-
-        [risk, 50].min # Cap at 50 to leave room for other risk factors
+        total = factors.sum { |factor| factor[:points] }
+        factors << {name: "user_agent_cap", points: 50 - total, evidence: {cap: 50}} if total > 50
+        info[:suspicious] = factors.any? { |factor| %w[user_agent_bot user_agent_suspicious_pattern].include?(factor[:name]) }
+        {score: [total, 50].min, device_info: info, factors: factors}
       end
 
       private

@@ -38,8 +38,7 @@ module Beskar
         logger.send(level, formatted_message)
       rescue => e
         # Fallback to stderr if logging fails
-        warn "[Beskar::Logger] Failed to log message: #{e.message}"
-        warn "[Beskar::Logger] Original message: #{formatted_message}"
+        Kernel.warn "[Beskar::Logger] Logging unavailable (#{e.class})"
       end
 
       # Configure the logger instance

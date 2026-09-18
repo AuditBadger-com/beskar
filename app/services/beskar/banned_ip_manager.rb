@@ -9,10 +9,16 @@ module Beskar
     end
 
     def create
-      @banned_ip = BannedIp.new(base_attributes)
-      configure_ban_duration
+      build.save
+    end
 
-      @banned_ip.save
+    def build
+      @banned_ip = BannedIp.new(base_attributes)
+      unless [nil, "", "temporary", "permanent"].include?(@params[:ban_type])
+        raise Services::AdministrativeBans::InvalidInput, "Select a valid ban type"
+      end
+      configure_ban_duration
+      @banned_ip
     end
 
     def success?
@@ -53,14 +59,15 @@ module Beskar
     end
 
     def calculate_expiry_time
-      return custom_expiry_time if custom_expiry_time.present?
-      return preset_duration_expiry if preset_duration.present?
+      custom_expiry = custom_expiry_time
+      return custom_expiry if custom_expiry
+      return preset_duration_expiry unless [nil, ""].include?(preset_duration)
 
       default_expiry_time
     end
 
     def custom_expiry_time
-      @params[:expires_at]
+      Services::BanExpiry.parse(@params[:expires_at])
     end
 
     def preset_duration
@@ -68,6 +75,9 @@ module Beskar
     end
 
     def preset_duration_expiry
+      unless preset_duration.to_s.match?(/\A[1-9]\d{0,6}\z/) && preset_duration.to_i <= 90.days.to_i
+        raise Services::AdministrativeBans::InvalidInput, "Duration must be a positive number of seconds, at most 90 days"
+      end
       Time.current + preset_duration.to_i.seconds
     end
 

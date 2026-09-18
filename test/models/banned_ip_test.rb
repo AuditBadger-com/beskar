@@ -43,7 +43,8 @@ class BannedIpTest < ActiveSupport::TestCase
     Beskar::BannedIp.create!(
       ip_address: "192.168.1.100",
       reason: "first",
-      banned_at: Time.current
+      banned_at: Time.current,
+      expires_at: 1.hour.from_now
     )
 
     duplicate = Beskar::BannedIp.new(
@@ -306,14 +307,14 @@ class BannedIpTest < ActiveSupport::TestCase
     assert_equal "/wp-admin", ban.metadata["path"]
   end
 
-  test "ban! updates cache" do
+  test "ban! enforces without populating cache" do
     ip = "10.0.0.54"
 
     Beskar::BannedIp.ban!(ip, reason: "test", duration: 1.hour)
 
-    # Cache should be set
     cache_key = "beskar:banned_ip:#{ip}"
-    assert Rails.cache.read(cache_key)
+    assert_nil Rails.cache.read(cache_key)
+    assert Beskar::BannedIp.banned?(ip)
   end
 
   test "ban! handles race condition when multiple threads ban same IP simultaneously" do
@@ -399,27 +400,21 @@ class BannedIpTest < ActiveSupport::TestCase
     assert_not Beskar::BannedIp.banned?(ip)
   end
 
-  test "banned? uses cache for performance" do
+  test "banned? ignores stale negative cache entries" do
     ip = "10.0.0.63"
     Beskar::BannedIp.ban!(ip, reason: "test", duration: 1.hour)
 
-    # First call queries database and sets cache
     assert Beskar::BannedIp.banned?(ip)
-
-    # Second call should use cache
-    Beskar::BannedIp.expects(:find_by).never
+    Rails.cache.write("beskar:banned_ip:#{ip}", false)
     assert Beskar::BannedIp.banned?(ip)
   end
 
-  test "banned? caches negative results" do
+  test "banned? does not cache negative results" do
     ip = "10.0.0.64"
 
-    # First call queries database and sets cache (false)
     assert_not Beskar::BannedIp.banned?(ip)
-
-    # Cache should be set to false
     cache_key = "beskar:banned_ip:#{ip}"
-    assert_equal false, Rails.cache.read(cache_key)
+    assert_nil Rails.cache.read(cache_key)
   end
 
   # Class methods - unban!
@@ -443,7 +438,7 @@ class BannedIpTest < ActiveSupport::TestCase
   end
 
   # Class methods - preload_cache!
-  test "preload_cache! loads all active bans into cache" do
+  test "legacy preload_cache! is optional and does not affect enforcement" do
     Rails.cache.clear
 
     # Create some bans
@@ -470,12 +465,10 @@ class BannedIpTest < ActiveSupport::TestCase
 
     Beskar::BannedIp.preload_cache!
 
-    # Active bans should be in cache
-    assert Rails.cache.read("beskar:banned_ip:10.0.0.80")
-    assert Rails.cache.read("beskar:banned_ip:10.0.0.81")
-
-    # Expired ban should not be in cache
-    assert_not Rails.cache.read("beskar:banned_ip:10.0.0.82")
+    assert Beskar::BannedIp.banned?("10.0.0.80")
+    assert Beskar::BannedIp.banned?("10.0.0.81")
+    assert_not Beskar::BannedIp.banned?("10.0.0.82")
+    assert_nil Rails.cache.read("beskar:banned_ip:10.0.0.80")
   end
 
   # Class methods - cleanup_expired!
@@ -516,6 +509,7 @@ class BannedIpTest < ActiveSupport::TestCase
       ip_address: "10.0.0.100",
       reason: "test",
       banned_at: Time.current,
+      expires_at: 1.hour.from_now,
       metadata: {key: "value", nested: {data: "test"}}
     )
 

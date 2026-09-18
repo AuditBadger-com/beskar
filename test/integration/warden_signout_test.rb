@@ -1,215 +1,76 @@
 require "test_helper"
-require "ostruct"
 
-class WardenSignoutTest < ActionDispatch::IntegrationTest
+class WardenSignoutTest < ActiveSupport::TestCase
   setup do
-    @user = DeviseUser.create!(
-      email: "warden_test@example.com",
-      password: "password123",
-      password_confirmation: "password123"
-    )
-
-    # Configure for high-risk locking
-    Beskar.configuration = Beskar::Configuration.new
-    Beskar.configuration.security_tracking[:enabled] = true
-    Beskar.configuration.risk_based_locking[:enabled] = true
-    Beskar.configuration.risk_based_locking[:risk_threshold] = 40  # Very sensitive
-    Beskar.configuration.risk_based_locking[:log_lock_events] = true
-
-    Beskar::SecurityEvent.delete_all
+    @user = create(:devise_user)
+    Beskar.configuration.risk_based_locking.merge!(enabled: true, immediate_signout: true)
+    request = ActionDispatch::TestRequest.create("REMOTE_ADDR" => "203.0.113.1")
+    @attempt = Beskar::Services::AuthenticationAttempt.reserve(request, model: DeviseUser, scope: :devise_user, user: @user)
+    @event = Beskar::SecurityEvent.new(user: @user, event_type: "login_success", risk_score: 90, ip_address: "203.0.113.1")
+    @event.beskar_attempt = @attempt
   end
 
-  teardown do
-    @user&.destroy
-    Beskar::SecurityEvent.delete_all
+  test "helper recognizes only a lock confirmed by the current attempt" do
+    refute Beskar::Engine.user_was_just_locked?(@user, @event)
+    @attempt.locked_now = true
+    assert Beskar::Engine.user_was_just_locked?(@user, @event)
   end
 
-  test "user_was_just_locked? detects recent lock events" do
-    # Create a security event (simulating authentication)
-    security_event = @user.security_events.create!(
-      event_type: "login_success",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 50
-    )
-
-    # Create a lock event
-    @user.security_events.create!(
-      event_type: "account_locked",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 85
-    )
-
-    # Should detect the recent lock
-    assert Beskar::Engine.user_was_just_locked?(@user, security_event),
-      "Should detect lock event created within 10 seconds"
+  test "recent unrelated lock and attempted lock records cannot trigger signout" do
+    %w[account_locked lock_attempted].each do |type|
+      @user.security_events.create!(event_type: type, ip_address: "203.0.113.1", risk_score: 90)
+    end
+    refute Beskar::Engine.user_was_just_locked?(@user, @event)
+    auth = mock("warden")
+    auth.expects(:logout).never
+    @user.check_high_risk_lock_and_signout(auth, scope: :devise_user, attempt: @attempt)
   end
 
-  test "user_was_just_locked? ignores old lock events" do
-    security_event = @user.security_events.create!(
-      event_type: "login_success",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 50
-    )
-
-    # Create an old lock event
-    old_lock = @user.security_events.create!(
-      event_type: "account_locked",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 85,
-      created_at: 1.minute.ago
-    )
-
-    # Update the timestamp to be old (can't set in create! due to ActiveRecord)
-    old_lock.update_column(:created_at, 1.minute.ago)
-
-    # Should NOT detect old locks
-    assert_not Beskar::Engine.user_was_just_locked?(@user, security_event),
-      "Should ignore lock events older than 10 seconds"
+  test "nil event and different user cannot trigger detection" do
+    @attempt.locked_now = true
+    refute Beskar::Engine.user_was_just_locked?(@user, nil)
+    refute Beskar::Engine.user_was_just_locked?(create(:devise_user), @event)
   end
 
-  test "user_was_just_locked? returns false when locking disabled" do
+  test "helper honors disabled risk locking" do
+    @attempt.locked_now = true
     Beskar.configuration.risk_based_locking[:enabled] = false
-
-    security_event = @user.security_events.create!(
-      event_type: "login_success",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 50
-    )
-
-    @user.security_events.create!(
-      event_type: "account_locked",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 85
-    )
-
-    assert_not Beskar::Engine.user_was_just_locked?(@user, security_event),
-      "Should return false when risk-based locking is disabled"
+    refute Beskar::Engine.user_was_just_locked?(@user, @event)
   end
 
-  test "user_was_just_locked? handles nil security_event" do
-    assert_not Beskar::Engine.user_was_just_locked?(@user, nil),
-      "Should handle nil security event gracefully"
+  test "signout affects only the explicitly correlated scope" do
+    @attempt.locked_now = true
+    auth = mock("warden")
+    auth.expects(:logout).with(:devise_user).once
+    result = catch(:warden) { @user.check_high_risk_lock_and_signout(auth, scope: :devise_user, attempt: @attempt) }
+    assert_equal :devise_user, result[:scope]
   end
 
-  test "check_high_risk_lock_and_signout detects recent locks" do
-    # Create recent lock event
-    @user.security_events.create!(
-      event_type: "account_locked",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 85
-    )
-
-    # Create mock Warden auth object
-    mock_auth = OpenStruct.new(logout_called: false)
-    def mock_auth.logout
-      self.logout_called = true
-    end
-
-    # Should throw :warden when lock detected
-    assert_throws(:warden) do
-      @user.check_high_risk_lock_and_signout(mock_auth)
-    end
-
-    # Verify logout was called
-    assert mock_auth.logout_called, "logout should have been called"
+  test "signout requires the matching scope" do
+    @attempt.locked_now = true
+    auth = mock("warden")
+    auth.expects(:logout).never
+    @user.check_high_risk_lock_and_signout(auth, scope: :other, attempt: @attempt)
+    @user.check_high_risk_lock_and_signout(auth, attempt: @attempt)
   end
 
-  test "check_high_risk_lock_and_signout ignores old locks" do
-    # Create old lock event
-    old_lock = @user.security_events.create!(
-      event_type: "account_locked",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 85,
-      created_at: 10.seconds.ago
-    )
-    old_lock.update_column(:created_at, 10.seconds.ago)
-
-    # Create mock auth
-    mock_auth = Object.new
-
-    # Should not throw or call logout
-    assert_nothing_raised do
-      @user.check_high_risk_lock_and_signout(mock_auth)
-    end
+  test "legacy false setting cannot bypass a confirmed lock" do
+    @attempt.locked_now = true
+    Beskar.configuration.risk_based_locking[:immediate_signout] = false
+    auth = mock("warden")
+    auth.expects(:logout).with(:devise_user).once
+    result = catch(:warden) { @user.check_high_risk_lock_and_signout(auth, scope: :devise_user, attempt: @attempt) }
+    assert_equal :devise_user, result[:scope]
   end
 
-  test "check_high_risk_lock_and_signout respects configuration" do
-    Beskar.configuration.risk_based_locking[:enabled] = false
-
-    # Create recent lock
-    @user.security_events.create!(
-      event_type: "account_locked",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 85
-    )
-
-    mock_auth = Object.new
-
-    # Should not throw when disabled
-    assert_nothing_raised do
-      @user.check_high_risk_lock_and_signout(mock_auth)
-    end
-  end
-
-  test "lock_attempted events also trigger signout" do
-    # Even if lock fails, attempted lock should trigger signout
-    @user.security_events.create!(
-      event_type: "lock_attempted",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 85
-    )
-
-    mock_auth = OpenStruct.new(logout_called: false)
-    def mock_auth.logout
-      self.logout_called = true
-    end
-
-    assert_throws(:warden) do
-      @user.check_high_risk_lock_and_signout(mock_auth)
-    end
-
-    assert mock_auth.logout_called, "logout should have been called"
-  end
-
-  test "multiple lock events within window all trigger detection" do
-    security_event = @user.security_events.create!(
-      event_type: "login_success",
-      ip_address: "203.0.113.1",
-      user_agent: "Test",
-      risk_score: 50
-    )
-
-    # Create multiple lock events
-    3.times do
-      @user.security_events.create!(
-        event_type: "account_locked",
-        ip_address: "203.0.113.1",
-        user_agent: "Test",
-        risk_score: 85
-      )
-    end
-
-    # Should detect at least one
-    assert Beskar::Engine.user_was_just_locked?(@user, security_event)
-  end
-
-  test "user without security_events association handled gracefully" do
-    # Create a simple object without the association
-    simple_user = Object.new
-
-    assert_nothing_raised do
-      result = Beskar::Engine.user_was_just_locked?(simple_user, nil)
-      assert_not result
-    end
+  test "signout respects monitor and whitelist policy" do
+    @attempt.locked_now = true
+    auth = mock("warden")
+    auth.expects(:logout).never
+    Beskar.configuration.monitor_only = true
+    @user.check_high_risk_lock_and_signout(auth, scope: :devise_user, attempt: @attempt)
+    Beskar.configuration.monitor_only = false
+    Beskar.configuration.ip_whitelist = [@attempt.ip_address]
+    @user.check_high_risk_lock_and_signout(auth, scope: :devise_user, attempt: @attempt)
   end
 end

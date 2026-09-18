@@ -2,10 +2,7 @@
 
 <% content_for :header_actions do %>
   <div style="display: flex; gap: 0.5rem;">
-    <%= link_to "Export CSV", export_security_events_path(request.query_parameters.merge(format: :csv)),
-        class: "btn btn-secondary" %>
-    <%= link_to "Export JSON", export_security_events_path(request.query_parameters.merge(format: :json)),
-        class: "btn btn-secondary" %>
+    <%= render "beskar/shared/export_form", export_url: export_security_events_path %>
   </div>
 <% end %>
 
@@ -46,12 +43,7 @@
         <div class="form-group">
           <label>Risk Level</label>
           <%= select_tag :risk_level,
-              options_for_select([
-                ['Low (0-30)', 'low'],
-                ['Medium (31-60)', 'medium'],
-                ['High (61-85)', 'high'],
-                ['Critical (86-100)', 'critical']
-              ], params[:risk_level]),
+              options_for_select(@risk_levels, params[:risk_level]),
               prompt: 'All risk levels',
               style: "width: 100%;" %>
         </div>
@@ -109,15 +101,16 @@
   </div>
 
   <div style="display: flex; align-items: center; gap: 0.5rem;">
-    <label style="margin: 0; font-size: 13px; color: #697386;">Per page:</label>
+    <label for="per_page" style="margin: 0; font-size: 13px; color: #697386;">Per page:</label>
     <%= form_with url: security_events_path, method: :get, local: true, style: "display: inline;" do |f| %>
-      <% request.query_parameters.except(:per_page).each do |key, value| %>
+      <% request.query_parameters.except("per_page", "page").each do |key, value| %>
         <%= hidden_field_tag key, value %>
       <% end %>
       <%= select_tag :per_page,
           options_for_select([10, 25, 50, 100], params[:per_page]&.to_i || 25),
-          onchange: "this.form.submit();",
+          data: { beskar_auto_submit: true },
           style: "padding: 0.25rem 0.5rem; font-size: 13px;" %>
+      <%= submit_tag "Apply page size", class: "btn btn-sm btn-secondary" %>
     <% end %>
   </div>
 </div>
@@ -178,14 +171,14 @@
                 <td>
                   <% if event.user %>
                     <div style="font-size: 13px;">
-                      <%= event.user.try(:email) || "User ##{event.user_id}" %>
+                      <%= audit_user_label(event) %>
                     </div>
                     <div style="font-size: 11px; color: #697386;">
                       ID: <%= event.user_id %>
                     </div>
                   <% elsif event.attempted_email %>
                     <div style="font-size: 13px; color: #697386;">
-                      <%= event.attempted_email %>
+                      <%= audit_user_label(event) %>
                     </div>
                     <div style="font-size: 11px; color: #C1C7D0;">
                       (attempted)

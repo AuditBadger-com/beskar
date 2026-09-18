@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "digest"
+
 begin
   require "maxminddb"
 rescue LoadError
@@ -99,6 +101,7 @@ module Beskar
           dlon = lon2_rad - lon1_rad
 
           a = Math.sin(dlat / 2)**2 + Math.cos(lat1_rad) * Math.cos(lat2_rad) * Math.sin(dlon / 2)**2
+          a = a.clamp(0.0, 1.0)
           c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 
           # Earth's radius in kilometers
@@ -107,35 +110,36 @@ module Beskar
         end
       end
 
-      # Get or initialize the MaxMind City database reader
-      # Uses thread-safe singleton pattern for efficient database access
-      #
-      # @return [MaxMindDB::Reader, nil] The reader instance or nil if not configured
-      def self.city_reader
-        return @city_reader if @city_reader
-        return nil unless Beskar.configuration.maxmind_city_db_path
-        return nil unless defined?(MaxMindDB)
+      # Namespace readers and optional caches by the configured database generation.
+      def self.database_identity
+        path = Beskar.configuration.maxmind_city_db_path.to_s
+        stat = File.stat(path) if path.present?
+        [path, stat&.ino, stat&.size, stat&.mtime&.to_r&.to_s]
+      rescue SystemCallError
+        [path, nil, nil, nil]
+      end
 
+      def self.city_reader(identity = database_identity)
         @city_reader_mutex.synchronize do
-          return @city_reader if @city_reader
-
-          db_path = Beskar.configuration.maxmind_city_db_path
-          if File.exist?(db_path)
-            @city_reader = MaxMindDB.new(db_path)
-            Beskar::Logger.info("MaxMind City database loaded from #{db_path}", component: :GeolocationService)
-          else
-            Beskar::Logger.warn("MaxMind City database not found at #{db_path}", component: :GeolocationService)
-          end
-          @city_reader
+          return @city_reader if @city_reader_identity == identity && @city_reader
+          @city_reader = nil
+          @city_reader_identity = identity
+          path = identity.first
+          return nil unless path.present? && defined?(MaxMindDB) && File.file?(path)
+          @city_reader = MaxMindDB.new(path)
         end
-      rescue => e
-        Beskar::Logger.error("Failed to load MaxMind City database: #{e.message}", component: :GeolocationService)
+      rescue => error
+        Beskar::Logger.error("Failed to load MaxMind database (#{error.class})", component: :GeolocationService)
         nil
       end
 
-      # Reset the database reader (useful for testing or reloading configuration)
+      # Existing lookups can finish using their reader; do not close it underneath
+      # another thread. New lookups select the current database generation.
       def self.reset_readers!
-        @city_reader_mutex.synchronize { @city_reader = nil }
+        @city_reader_mutex.synchronize do
+          @city_reader = nil
+          @city_reader_identity = nil
+        end
       end
 
       # Initialize the geolocation service
@@ -143,7 +147,11 @@ module Beskar
       # @param provider [Symbol] The geolocation provider to use (:maxmind, :mock)
       def initialize(provider: nil)
         @provider = provider || Beskar.configuration.geolocation_provider
-        @cache_key_prefix = "beskar:geolocation"
+        unless Configuration::GEOLOCATION_PROVIDERS.include?(@provider)
+          raise Configuration::Error, "geolocation.provider must be mock or maxmind"
+        end
+        @database_identity = self.class.database_identity
+        @cache_key_prefix = "beskar:geolocation:v2:#{Digest::SHA256.hexdigest([@provider, @database_identity].to_json)}"
         @cache_ttl = Beskar.configuration.geolocation_cache_ttl
       end
 
@@ -167,10 +175,10 @@ module Beskar
         result = case @provider
         when :maxmind
           lookup_maxmind(ip_address)
-        when :ip2location
-          lookup_ip2location(ip_address)
-        else
+        when :mock
           lookup_mock(ip_address)
+        else
+          unknown_location(ip_address)
         end
 
         # Cache the result
@@ -178,7 +186,7 @@ module Beskar
 
         result
       rescue => e
-        Beskar::Logger.warn("Failed to locate IP #{ip_address}: #{e.message}", component: :GeolocationService)
+        Beskar::Logger.warn("Failed to locate IP #{ip_address}: #{e.class}", component: :GeolocationService)
         unknown_location(ip_address)
       end
 
@@ -190,55 +198,28 @@ module Beskar
       # @param max_speed_kmh [Integer] Maximum realistic travel speed in km/h (default: 1000 for commercial flights)
       # @return [Boolean] true if travel is impossible
       def impossible_travel?(location1, location2, time_diff_seconds, max_speed_kmh: 1000)
-        return false if location1.nil? || location2.nil?
-        return false unless location1[:latitude] && location2[:latitude]
-
-        distance_km = self.class.calculate_distance(
-          location1[:latitude], location1[:longitude],
-          location2[:latitude], location2[:longitude]
-        )
-
-        # Calculate maximum possible distance at given speed
-        time_hours = time_diff_seconds / 3600.0
-        max_distance_km = max_speed_kmh * time_hours
-
-        distance_km > max_distance_km
+        first, second = LocationAssessment.coordinates(location1), LocationAssessment.coordinates(location2)
+        elapsed, speed = LocationAssessment.number(time_diff_seconds), LocationAssessment.number(max_speed_kmh)
+        return false unless first && second && elapsed&.positive? && speed&.positive?
+        self.class.calculate_distance(*first, *second) > speed * elapsed / 3600.0
       end
 
-      # Calculate risk score based on geolocation factors
-      #
-      # @param ip_address [String] The IP address
-      # @param previous_locations [Array<Hash>] Array of previous location hashes
-      # @param time_since_last [Integer] Seconds since last login
-      # @return [Integer] Risk score from 0 to 30
+      def assess_location(ip_address, observations: [], at: Time.current, location: nil)
+        LocationAssessment.new(location || locate(ip_address), observations: observations, at: at).call
+      end
+
+      # Compatibility API for a single previous location and elapsed duration.
+      # Multi-observation callers must supply each observation's own timestamp.
       def calculate_location_risk(ip_address, previous_locations = [], time_since_last = nil)
-        current_location = locate(ip_address)
-        risk = 0
-
-        # Private/unknown IPs have moderate risk
-        return 10 if current_location[:country] == "Unknown" || current_location[:country] == "Private"
-
-        # Check for impossible travel if we have previous locations
-        if previous_locations.any? && time_since_last
-          previous_locations.each do |prev_location|
-            if impossible_travel?(current_location, prev_location, time_since_last)
-              risk += 25
-              break
-            end
-          end
+        at = Time.current
+        observations = if previous_locations.all? { |entry| entry.is_a?(Hash) && (entry.key?(:occurred_at) || entry.key?("occurred_at")) }
+          previous_locations
+        elsif previous_locations.size == 1 && (elapsed = LocationAssessment.number(time_since_last))&.positive?
+          [{location: previous_locations.first, occurred_at: at - elapsed}]
+        else
+          []
         end
-
-        # Country change adds some risk
-        if previous_locations.any?
-          recent_countries = previous_locations.map { |loc| loc[:country] }.uniq
-          risk += 10 unless recent_countries.include?(current_location[:country])
-        end
-
-        # Known high-risk countries (this would be configurable in production)
-        high_risk_countries = ["Unknown"]
-        risk += 15 if high_risk_countries.include?(current_location[:country])
-
-        [risk, 30].min # Cap at 30 to leave room for other risk factors
+        assess_location(ip_address, observations: observations, at: at)[:score]
       end
 
       private
@@ -319,7 +300,7 @@ module Beskar
         result = {ip: ip_address, provider: @provider, private_ip: false}
 
         # Lookup city/location data
-        if (city_reader = self.class.city_reader)
+        if (city_reader = self.class.city_reader(@database_identity))
           begin
             city_data = city_reader.lookup(ip_address)
             if city_data&.found?
@@ -339,7 +320,7 @@ module Beskar
               result.merge!(unknown_location(ip_address).except(:ip, :provider, :private_ip))
             end
           rescue => e
-            Beskar::Logger.warn("MaxMind City lookup failed for #{ip_address}: #{e.message}", component: :GeolocationService)
+            Beskar::Logger.warn("MaxMind City lookup failed for #{ip_address}: #{e.class}", component: :GeolocationService)
             result.merge!(unknown_location(ip_address).except(:ip, :provider, :private_ip))
           end
         else
@@ -349,20 +330,8 @@ module Beskar
 
         result
       rescue => e
-        Beskar::Logger.error("MaxMind lookup failed for #{ip_address}: #{e.message}", component: :GeolocationService)
+        Beskar::Logger.error("MaxMind lookup failed for #{ip_address}: #{e.class}", component: :GeolocationService)
         unknown_location(ip_address)
-      end
-
-      # Lookup using IP2Location database
-      #
-      # @param ip_address [String] The IP address
-      # @return [Hash] Location information from IP2Location
-      def lookup_ip2location(ip_address)
-        # This would integrate with IP2Location in production
-        # For now, return unknown result
-        result = unknown_location(ip_address)
-        result[:provider] = @provider
-        result
       end
 
       # Get cached location result
@@ -373,7 +342,7 @@ module Beskar
         cache_key = "#{@cache_key_prefix}:#{ip_address}"
         Rails.cache.read(cache_key)
       rescue => e
-        Beskar::Logger.debug("Cache read failed: #{e.message}", component: :GeolocationService)
+        Beskar::Logger.debug("Cache read failed: #{e.class}", component: :GeolocationService)
         nil
       end
 
@@ -385,7 +354,7 @@ module Beskar
         cache_key = "#{@cache_key_prefix}:#{ip_address}"
         Rails.cache.write(cache_key, result, expires_in: @cache_ttl)
       rescue => e
-        Beskar::Logger.debug("Cache write failed: #{e.message}", component: :GeolocationService)
+        Beskar::Logger.debug("Cache write failed: #{e.class}", component: :GeolocationService)
       end
     end
   end

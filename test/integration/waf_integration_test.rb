@@ -89,7 +89,7 @@ class WafIntegrationTest < ActionDispatch::IntegrationTest
     event = Beskar::SecurityEvent.last
     assert_equal "waf_violation", event.event_type
     assert_equal ip, event.ip_address
-    assert_equal "MaliciousBot/1.0", event.user_agent
+    assert_nil event.user_agent
     assert event.risk_score >= 70
     assert_not_nil event.metadata["waf_analysis"]
   end
@@ -120,7 +120,7 @@ class WafIntegrationTest < ActionDispatch::IntegrationTest
     critical_event = Beskar::SecurityEvent.last
 
     Rails.cache.clear
-    Beskar::SecurityEvent.destroy_all
+    Beskar::SecurityEvent.delete_all
 
     ip2 = worker_ip(21)
     # Medium violation (debug endpoint)
@@ -253,11 +253,11 @@ class WafIntegrationTest < ActionDispatch::IntegrationTest
     last_event = events.last
     assert last_event.metadata["monitor_only_mode"], "Event should indicate monitor-only mode"
     assert last_event.metadata["would_be_blocked"], "Event should indicate it would be blocked"
-    assert_equal Beskar.configuration.waf[:block_threshold], last_event.metadata["block_threshold"]
+    assert_equal Beskar.configuration.waf[:score_threshold], last_event.metadata["score_threshold"]
     assert last_event.metadata["violation_count"] >= 3
 
-    # Ban record should be created even in monitor mode
-    assert Beskar::BannedIp.banned?(ip), "Ban record should exist in monitor mode"
+    # Monitor mode records evidence without creating an active ban.
+    assert_not Beskar::BannedIp.banned?(ip)
 
     # But should still be able to access (not blocked)
     get "/", headers: {"X-Forwarded-For" => ip}
@@ -399,7 +399,7 @@ class WafIntegrationTest < ActionDispatch::IntegrationTest
     }
 
     event = Beskar::SecurityEvent.where(ip_address: ip).last
-    assert_equal user_agent, event.user_agent
+    assert_nil event.user_agent
   end
 
   # Multiple pattern matches

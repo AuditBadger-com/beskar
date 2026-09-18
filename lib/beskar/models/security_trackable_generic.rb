@@ -2,146 +2,168 @@ module Beskar
   module Models
     # Generic security tracking functionality shared by all authentication systems
     # This module provides the core security event tracking, risk scoring,
-    # and adaptive learning features that work with any authentication framework
+    # and risk evidence shared by the supported authentication adapters
     module SecurityTrackableGeneric
       extend ActiveSupport::Concern
 
       included do
-        has_many :security_events, class_name: "Beskar::SecurityEvent", as: :user, dependent: :destroy
+        # Audit rows outlive the account, retaining the original polymorphic
+        # identity and stored evidence without deletion or nullification.
+        has_many :security_events, class_name: "Beskar::SecurityEvent", as: :user
       end
 
       module ClassMethods
         # Track failed authentication attempt without a user context
         # Used when authentication fails and we don't have a user object
-        def track_failed_authentication(request, scope)
-          # Skip tracking if disabled in configuration
-          unless Beskar.configuration.track_failed_logins?
-            Beskar::Logger.debug("Failed login tracking disabled in configuration")
-            return
-          end
-
-          # Extract attempted email from params based on scope
+        def track_failed_authentication(request, scope, attempt: nil)
           attempted_email = extract_attempted_email(request, scope)
+          attempt ||= Services::AuthenticationAttempt.current(request, scope)
+          unless attempt
+            key = attribute_names.include?("email_address") ? :email_address : :email
+            credentials = attempted_email ? {key => attempted_email} : {}
+            user = if credentials.empty?
+              nil
+            elsif respond_to?(:find_for_database_authentication)
+              find_for_database_authentication(credentials)
+            else
+              find_by(credentials)
+            end
+            attempt = Services::AuthenticationAttempt.reserve(request, model: self, scope: scope,
+              user: user, credentials: credentials)
+          end
+          attempted_email ||= attempt.attempted_email
+          return attempt.event if attempt.completed
 
-          # Create a security event for failed authentication
-          metadata = {
-            scope: scope.to_s,
-            attempted_email: attempted_email,
-            timestamp: Time.current.iso8601,
-            session_id: request.session.id,
-            request_path: request.path,
-            referer: request.referer,
-            accept_language: request.headers["Accept-Language"],
-            x_forwarded_for: request.headers["X-Forwarded-For"],
-            x_real_ip: request.headers["X-Real-IP"],
-            device_info: Beskar::Services::DeviceDetector.detect(request.user_agent),
-            geolocation: Beskar::Services::GeolocationService.locate(request.ip)
-          }
+          attempt.completed = true
+          return unless Beskar.configuration.track_failed_logins?
 
-          Beskar::SecurityEvent.create!(
-            user: nil,
-            event_type: "login_failure",
-            ip_address: request.ip,
-            user_agent: request.user_agent,
+          assessment = Services::RiskAssessment.new(request, user: attempt.user, result: :failure) if attempt.allowed?
+          event = Beskar::SecurityEvent.new(
+            user_type: attempt.user&.class&.polymorphic_name, user_id: attempt.user&.id,
+            event_type: attempt.allowed? ? "login_failure" : "authentication_blocked",
+            ip_address: Services::RequestContext.ip(request),
+            user_agent: Services::RequestContext.text(request.user_agent),
             attempted_email: attempted_email,
-            metadata: metadata,
-            risk_score: calculate_failure_risk_score(request)
+            metadata: Services::RequestContext.security_metadata(request, enrich: false).merge(assessment&.metadata || {}).merge(scope: scope.to_s,
+              request_path: attempt.request_path, authentication: attempt.metadata),
+            risk_score: assessment&.score || 0
           )
-
-          # Trigger rate limiting check
-          Beskar::Services::RateLimiter.check_authentication_attempt(request, :failure)
+          event.beskar_attempt = attempt
+          attempt.event = event
+          Beskar::SecurityEvent.transaction(requires_new: true) { event.save! }
+          event
+        rescue Services::AuthenticationAttempt::Unavailable
+          raise
+        rescue => error
+          Beskar::Logger.warn("Failed authentication audit unavailable (#{error.class})")
+          attempt&.event
         end
 
         private
 
         def extract_attempted_email(request, scope)
           # Try different param patterns based on scope
-          request.params.dig("devise_user", "email") ||
-            request.params.dig(scope.to_s, "email") ||
+          request.params.dig(scope.to_s, "email") ||
+            request.params.dig(scope.to_s, "email_address") ||
+            request.params.dig("devise_user", "email") ||
             request.params.dig("user", "email") ||
+            request.params.dig("user", "email_address") ||
             request.params.dig("email_address") ||
             request.params["email"]
         end
 
         def calculate_failure_risk_score(request)
-          score = 10 # Base score for failed login
-
-          # Use device detector for comprehensive risk assessment
-          device_detector = Beskar::Services::DeviceDetector.new
-          score += device_detector.calculate_user_agent_risk(request.user_agent)
-
-          # Additional failure-specific risk factors
-          password = request.params.dig("user", "password") ||
-            request.params.dig("devise_user", "password") ||
-            request.params["password"]
-
-          if password&.length.to_i > 50
-            score += 10
-            Beskar::Logger.info("Suspicious password length: #{password.length}, adding 10 risk")
-          end
-
-          # Use geolocation service for location-based risk
-          geolocation_service = Beskar::Services::GeolocationService.new
-          geo_score = geolocation_service.calculate_location_risk(request.ip)
-          score += geo_score
-          Beskar::Logger.info("Geolocation risk: #{geo_score}")
-
-          [score, 100].min # Cap at 100
+          Services::RiskAssessment.new(request, result: :failure).score
         end
       end
 
       # Track authentication event (success or failure) for a specific user
-      def track_authentication_event(request, result)
+      def track_authentication_event(request, result, attempt: nil, persist: true)
         return unless request
 
-        # Check if tracking is enabled for this event type
-        if result == :success && !Beskar.configuration.track_successful_logins?
-          Beskar::Logger.debug("Successful login tracking disabled in configuration")
-          return
-        elsif result == :failure && !Beskar.configuration.track_failed_logins?
-          Beskar::Logger.debug("Failed login tracking disabled in configuration")
+        attempt ||= Services::AuthenticationAttempt.reserve(request, model: self.class,
+          scope: self.class.name.underscore, user: self)
+        attempt.bind_user!(self)
+        return attempt.event if attempt.completed
+        tracking = (result == :success) ? Beskar.configuration.track_successful_logins? : Beskar.configuration.track_failed_logins?
+        assessment_required = tracking || (result == :success && Beskar.configuration.risk_based_locking_enabled?)
+        unless assessment_required
+          attempt.completed = true
           return
         end
 
-        event_type = (result == :success) ? "login_success" : "login_failure"
-
-        security_event = security_events.build(
-          event_type: event_type,
-          ip_address: request.ip,
-          user_agent: request.user_agent,
+        # Build the decision even when audit persistence is disabled. A rejected
+        # credential attempt is never recorded as a trusted successful login.
+        # Do not build through has_many: saving/locking the user can autosave its
+        # unsaved children and accidentally make optional audit writes mandatory.
+        assessment = assess_authentication_risk(request, result)
+        security_event = Beskar::SecurityEvent.new(
+          user_type: self.class.polymorphic_name, user_id: id,
+          event_type: (result == :success) ? "login_success" : "login_failure",
+          ip_address: Services::RequestContext.ip(request),
+          user_agent: Services::RequestContext.text(request.user_agent),
           attempted_email: extract_user_email,
-          metadata: extract_security_context(request),
-          risk_score: calculate_risk_score(request, result)
+          metadata: Services::RequestContext.security_metadata(request, enrich: false).merge(assessment.metadata),
+          risk_score: assessment.score
         )
+        security_event.beskar_attempt = attempt
+        attempt.event = security_event
 
-        if security_event.save
-          # Perform background security analysis
-          analyze_suspicious_patterns_async if result == :success && Beskar.configuration.auto_analyze_patterns?
-
-          # Update rate limiting
-          Beskar::Services::RateLimiter.check_authentication_attempt(request, result, self)
-
-          # Check risk-based locking after successful authentication
-          # This prevents compromised accounts from being used even after successful login
-          if result == :success
-            check_and_lock_if_high_risk(security_event, request)
+        if result == :success && attempt.allowed?
+          attempt.locked_now = !!check_and_lock_if_high_risk(security_event, request)
+          if attempt.locked_now
+            attempt.deny!(:account_locked)
           end
         end
 
+        attempt.verify_generation!
+        security_event.event_type = "authentication_blocked" unless attempt.allowed?
+        security_event.metadata = (security_event.metadata || {}).merge("authentication" => attempt.metadata)
+        attempt.completed = true
+        return unless tracking && persist
+
+        persist_authentication_audit(security_event)
+        analyze_suspicious_patterns_async if result == :success && attempt.allowed? && Beskar.configuration.auto_analyze_patterns?
         security_event
+      rescue Services::AuthenticationAttempt::Unavailable
+        raise
+      rescue => error
+        Beskar::Logger.error("Authentication risk assessment unavailable (#{error.class})")
+        # A broken risk assessment must not silently admit a potentially locked
+        # account. Audit writes have their own non-fatal boundary below.
+        if Beskar.configuration.risk_based_locking_enabled? && Services::RequestContext.enforce?(attempt&.ip_address)
+          raise Services::AuthenticationAttempt::Unavailable, "Authentication temporarily unavailable"
+        end
+        attempt.completed = true if attempt
+        nil
       end
 
       def analyze_suspicious_patterns_async
-        # Skip analysis if disabled in configuration
-        unless Beskar.configuration.auto_analyze_patterns?
-          Beskar::Logger.debug("Auto pattern analysis disabled in configuration")
-          return
+        return unless Beskar.configuration.auto_analyze_patterns?
+        job = Beskar.configuration.analysis_job_class
+        arguments = {user_type: self.class.base_class.name, user_id: id, event_type: "login_success"}
+        # Never enqueue for an outer transaction that later rolls back. The job
+        # is optional enrichment, not delayed authentication enforcement.
+        ActiveRecord.after_all_transactions_commit do
+          result = job.perform_later(**arguments)
+          Beskar::Logger.warn("Security analysis job was not enqueued") unless result
+        rescue => error
+          Beskar::Logger.warn("Failed to queue security analysis (#{error.class})")
         end
-
-        # Queue background job for detailed analysis
-        Beskar::SecurityAnalysisJob.perform_later(id, "login_success") if defined?(Beskar::SecurityAnalysisJob)
       rescue => e
-        Beskar::Logger.warn("Failed to queue security analysis: #{e.message}")
+        Beskar::Logger.warn("Failed to prepare security analysis (#{e.class})")
+      end
+
+      def beskar_session_token
+        Services::SessionRevocation.token(self)
+      end
+
+      def revoke_beskar_sessions!
+        Services::SessionRevocation.revoke!(self)
+      end
+
+      def beskar_session_valid?(request, token:)
+        Services::SessionRevocation.allowed?(self, request: request, token: token)
       end
 
       def recent_failed_attempts(within: 1.hour)
@@ -164,13 +186,19 @@ module Beskar
         return true if recent_attempts.count >= 3
 
         # Check for geographic anomalies
-        recent_logins = recent_successful_logins(within: 4.hours).includes(:security_events)
-        return true if geographic_anomaly_detected?(recent_logins)
+        return true if geographic_anomaly_detected?
 
         false
       end
 
       private
+
+      def persist_authentication_audit(event)
+        Beskar::SecurityEvent.transaction(requires_new: true) { event.save }
+      rescue => error
+        Beskar::Logger.warn("Authentication audit unavailable (#{error.class})")
+        false
+      end
 
       def extract_user_email
         # Try different email attribute names
@@ -182,67 +210,24 @@ module Beskar
       end
 
       def extract_security_context(request)
-        {
-          timestamp: Time.current.iso8601,
-          session_id: request.session.id,
-          request_path: request.path,
-          referer: request.referer,
-          accept_language: request.headers["Accept-Language"],
-          x_forwarded_for: request.headers["X-Forwarded-For"],
-          x_real_ip: request.headers["X-Real-IP"],
-          device_info: Beskar::Services::DeviceDetector.detect(request.user_agent),
-          geolocation: Beskar::Services::GeolocationService.locate(request.ip)
-        }
+        Services::RequestContext.security_metadata(request)
       end
 
+      def assess_authentication_risk(request, result)
+        Services::RiskAssessment.new(request, user: self, result: result)
+      end
+
+      # Numeric compatibility helper; authentication uses the complete assessment.
       def calculate_risk_score(request, result)
-        base_score = (result == :success) ? 1 : 25
-        score = base_score
-
-        # Use dedicated services for risk assessment
-        device_detector = Beskar::Services::DeviceDetector.new
-        score += device_detector.calculate_user_agent_risk(request.user_agent)
-
-        # Mobile device login during late hours
-        if device_detector.mobile?(request.user_agent) && Time.current.hour.between?(22, 6)
-          score += 5
-          Beskar::Logger.info("Mobile device login during late hours, adding 5 risk")
-        end
-
-        # Account-specific risk factors
-        if recent_failed_attempts(within: 10.minutes).count >= 2
-          score += 20
-          Beskar::Logger.info("Recent failed attempts: #{recent_failed_attempts(within: 10.minutes).count}, adding 20 risk")
-        end
-
-        # ADAPTIVE LEARNING: Check if this is an established pattern
-        if result == :success && established_pattern?(request)
-          Beskar::Logger.info("Established pattern detected, reducing risk score")
-          score = [score * 0.3, 25].min.to_i # Reduce to 30% of original, cap at 25
-        end
-
-        # Geographic risk assessment
-        geolocation_service = Beskar::Services::GeolocationService.new
-        recent_locations = recent_successful_logins(within: 4.hours).map do |event|
-          event.metadata&.dig("geolocation")
-        end.compact
-
-        # Don't apply geographic risk if this location is established
-        unless location_established?(request.ip)
-          score += geolocation_service.calculate_location_risk(
-            request.ip,
-            recent_locations,
-            recent_successful_logins(within: 4.hours).last&.created_at&.to_i
-          )
-        end
-
-        [score, 100].min # Cap at 100
+        assess_authentication_risk(request, result).score
       end
 
-      def geographic_anomaly_detected?(recent_logins)
-        # Placeholder for geographic anomaly detection
-        # Would implement haversine formula and impossible travel detection
-        false
+      def geographic_anomaly_detected?
+        observations = Services::RiskAssessment.observations(self)
+        observations.sort_by { |entry| [entry[:occurred_at], entry[:event_id]] }.each_cons(2).any? do |previous, current|
+          assessment = Services::LocationAssessment.new(current[:location], observations: [previous], at: current[:occurred_at]).call
+          assessment[:location][:impossible_travel]
+        end
       end
 
       # Check if the account should be locked based on risk score
@@ -255,40 +240,52 @@ module Beskar
           risk_score: security_event.risk_score,
           reason: determine_lock_reason(security_event),
           metadata: {
-            ip_address: request.ip,
-            user_agent: request.user_agent,
+            ip_address: Beskar::Services::RequestContext.ip(request),
+            user_agent: Services::RequestContext.text(request.user_agent),
             security_event_id: security_event.id,
+            authentication_attempt_id: security_event.beskar_attempt&.id,
             geolocation: security_event.geolocation,
-            device_info: security_event.device_info
+            device_info: security_event.device_info,
+            risk_assessment: security_event.metadata["risk_assessment"]
           }
         )
+
+        security_event.metadata["lock_decision"] = {
+          "threshold" => Beskar.configuration.risk_threshold,
+          "strategy_available" => locker.supported?,
+          "would_lock" => locker.supported? && security_event.risk_score >= Beskar.configuration.risk_threshold && !locker.locked?,
+          "enforcement_enabled" => Services::RequestContext.enforce?(Services::RequestContext.ip(request))
+        }
 
         if locker.lock_if_necessary!
           Beskar::Logger.warn("Account locked due to high risk score: #{security_event.risk_score}")
 
           # Trigger auth-system-specific lock handling
           handle_high_risk_lock(security_event, request)
+          true
+        else
+          false
         end
       end
 
       # Determine the specific reason for locking
       def determine_lock_reason(security_event)
-        metadata = security_event.metadata || {}
+        metadata = (security_event.metadata || {}).deep_stringify_keys
 
         # Check for impossible travel
-        if metadata.dig("geolocation", "impossible_travel")
+        if metadata.dig("geolocation", "impossible_travel") == true
           return :impossible_travel
         end
 
         # Check for suspicious device
         device_info = metadata["device_info"] || {}
-        if device_info["bot_signature"] || device_info["suspicious"]
+        if device_info["bot"] == true || device_info["bot_signature"] == true || device_info["suspicious"] == true
           return :suspicious_device
         end
 
         # Check for geographic anomaly
         geolocation = metadata["geolocation"] || {}
-        if geolocation["country_change"] || geolocation["high_risk_country"]
+        if geolocation["country_change"] == true || geolocation["high_risk_country"] == true
           return :geographic_anomaly
         end
 
@@ -301,58 +298,14 @@ module Beskar
         Beskar::Logger.debug("High risk lock handled - override in specific module")
       end
 
-      # ADAPTIVE LEARNING: Check if this login pattern is established
-      def established_pattern?(request)
-        return false unless security_events.any?
-
-        current_ip = request.ip
-
-        # Look for successful logins from this IP in the past 30 days
-        historical_logins = security_events
-          .where(event_type: "login_success")
-          .where(ip_address: current_ip)
-          .where("created_at >= ?", 30.days.ago)
-          .where("created_at < ?", 5.minutes.ago)
-
-        # Need at least 2 successful logins from this context
-        return false if historical_logins.count < 2
-
-        # Check if there was an unlock event followed by successful logins
-        recent_unlock_or_lock = security_events
-          .where(event_type: ["account_locked", "account_unlocked", "lock_attempted"])
-          .where("created_at >= ?", 7.days.ago)
-          .order(created_at: :desc)
-          .first
-
-        if recent_unlock_or_lock
-          # Check for successful logins after unlock/lock from same IP
-          logins_after_unlock = security_events
-            .where(event_type: "login_success")
-            .where(ip_address: current_ip)
-            .where("created_at > ?", recent_unlock_or_lock.created_at)
-            .count
-
-          # If user unlocked and successfully logged in, that's legitimate
-          return true if logins_after_unlock >= 1
-        end
-
-        # Pattern is established if there are 3+ successful logins
-        historical_logins.count >= 3
+      # Kept for integrations that called these former private helpers. Repeated
+      # IP use, automatic unlocks, and account-lock attempts do not establish trust.
+      def established_pattern?(_request)
+        false
       end
 
-      # Check if a location (IP) is established/trusted
-      def location_established?(ip_address)
-        return false unless security_events.any?
-
-        successful_logins_from_ip = security_events
-          .where(event_type: "login_success")
-          .where(ip_address: ip_address)
-          .where("created_at >= ?", 30.days.ago)
-          .where("created_at < ?", 5.minutes.ago)
-          .count
-
-        # Location is established if there are 2+ successful logins
-        successful_logins_from_ip >= 2
+      def location_established?(_ip_address)
+        false
       end
     end
   end

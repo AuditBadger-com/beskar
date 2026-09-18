@@ -7,7 +7,7 @@ module Beskar
 
     setup do
       # Clear any existing data
-      Beskar::SecurityEvent.destroy_all
+      Beskar::SecurityEvent.delete_all
       Beskar::BannedIp.destroy_all
 
       # Configure authentication to allow access for tests
@@ -22,7 +22,7 @@ module Beskar
 
     teardown do
       # Reset configuration
-      Beskar.configuration = Beskar::Configuration.new
+      Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
     end
 
     # Authentication tests

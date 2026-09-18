@@ -248,6 +248,33 @@ module Beskar
       end
 
       # Test specific browser version extraction
+      test "modern browser versions never inherit stale regex captures as old browser risk" do
+        /Chrome (\d+)/ =~ "Chrome 1"
+        ["Chrome/120.0", "Firefox/130.0"].each do |browser|
+          assessment = @detector.assess("Mozilla/5.0 (Windows NT 10.0) #{browser}")
+          refute assessment[:factors].any? { |factor| factor[:name] == "old_browser" }
+        end
+        assessment = @detector.assess("Mozilla/5.0 (Windows NT 10.0) Chrome/89.0")
+        assert assessment[:factors].any? { |factor| factor[:name] == "old_browser" && factor[:points] == 5 }
+      end
+
+      test "risk factors sum to capped score without logging the supplied header" do
+        Rails.logger.expects(:info).never
+        assessment = @detector.assess("curl debug secret-header-value " + "(" * 600)
+        assert_equal 50, assessment[:score]
+        assert_equal assessment[:score], assessment[:factors].sum { |factor| factor[:points] }
+      end
+
+      test "late mobile scoring spans midnight but excludes six in the morning" do
+        request = ActionDispatch::TestRequest.create("REMOTE_ADDR" => "127.0.0.1",
+          "HTTP_USER_AGENT" => "Mozilla/5.0 (iPhone) Version/17.0 Mobile Safari/600")
+        {21 => false, 22 => true, 23 => true, 0 => true, 5 => true, 6 => false}.each do |hour, expected|
+          assessment = RiskAssessment.new(request, at: Time.zone.local(2026, 9, 11, hour))
+          present = assessment.metadata[:risk_assessment][:factors].any? { |factor| factor[:name] == "mobile_late_hours" }
+          assert_equal expected, present, "Wrong late-hour result at #{hour}"
+        end
+      end
+
       test "extracts Chrome version correctly with different formats" do
         user_agents = [
           "Mozilla/5.0 (Windows NT 10.0) Chrome/91.0.4472.124",

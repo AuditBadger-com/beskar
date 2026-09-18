@@ -7,9 +7,9 @@ module Beskar
 
       def call(env)
         request = ActionDispatch::Request.new(env)
-        ip_address = request.ip
+        ip_address = Beskar::Services::RequestContext.ip(request)
 
-        Beskar::Logger.debug("[RequestAnalyzer] Processing request from IP: #{ip_address}, Path: #{request.path}", component: :Middleware)
+        Beskar::Logger.debug("[RequestAnalyzer] Processing request from IP: #{ip_address}", component: :Middleware)
 
         # 1. Check if IP is whitelisted (whitelisted IPs skip blocking but still get logged)
         is_whitelisted = Beskar::Services::IpWhitelist.whitelisted?(ip_address)
@@ -25,9 +25,11 @@ module Beskar
         end
 
         # 3. Check rate limiting (unless whitelisted)
-        if !is_whitelisted && rate_limited?(request)
-          # Auto-block after excessive rate limiting violations (even in monitor-only mode - we create the ban record)
-          if should_auto_block_rate_limit?(ip_address)
+        rate_limit = Beskar.configuration.rate_limiting[:ip_attempts][:block_requests] ?
+          Beskar::Services::RateLimiter.check_ip_rate_limit(ip_address) : {allowed: true}
+        if !is_whitelisted && !rate_limit[:allowed]
+          # Observe denials separately in monitor mode; never create active bans.
+          if should_auto_block_rate_limit?(ip_address) && !Beskar.configuration.monitor_only?
             Beskar::BannedIp.ban!(
               ip_address,
               reason: "rate_limit_abuse",
@@ -40,7 +42,7 @@ module Beskar
             Beskar::Logger.warn("🔍 MONITOR-ONLY: Would block rate limit exceeded for IP: #{ip_address}, but monitor_only=true. Request proceeding normally.", component: :Middleware)
           else
             Beskar::Logger.warn("Rate limit exceeded for IP: #{ip_address}", component: :Middleware)
-            return rate_limit_response
+            return rate_limit_response(rate_limit[:retry_after])
           end
         end
 
@@ -54,6 +56,7 @@ module Beskar
             # Log the violation (and create security event if configured)
             # Pass whitelist status to prevent auto-blocking whitelisted IPs
             current_score = Beskar::Services::Waf.record_violation(ip_address, waf_analysis, whitelisted: is_whitelisted)
+            waf_recorded = true
             Beskar::Logger.debug("[RequestAnalyzer] Current score after recording: #{current_score.round(2)}", component: :Middleware)
 
             # Log even for whitelisted IPs (but don't block)
@@ -66,7 +69,7 @@ module Beskar
               Beskar::Logger.debug("[RequestAnalyzer] Should block IP #{ip_address}?: #{should_block}", component: :Middleware)
 
               if Beskar.configuration.monitor_only?
-                # Monitor-only mode: Just log, don't block (but ban record was created by WAF.record_violation)
+                # Monitor-only mode records observations without creating active bans.
                 if should_block
                   Beskar::Logger.warn("🔍 MONITOR-ONLY: Would block IP #{ip_address} " \
                     "with score #{current_score.round(2)}, but monitor_only=true. " \
@@ -82,7 +85,7 @@ module Beskar
               end
             end
           else
-            Beskar::Logger.debug("[RequestAnalyzer] No WAF threat detected for path: #{request.path}", component: :Middleware)
+            Beskar::Logger.debug("[RequestAnalyzer] No WAF threat detected", component: :Middleware)
           end
         else
           Beskar::Logger.debug("[RequestAnalyzer] WAF is disabled", component: :Middleware)
@@ -90,32 +93,33 @@ module Beskar
 
         # 5. Process the request normally (will raise 404 if route not found)
         Beskar::Logger.debug("[RequestAnalyzer] Passing request to application", component: :Middleware)
+        processing_host = true
         @app.call(env)
+      rescue Beskar::Services::AuthenticationAttempt::Unavailable
+        Beskar::Services::AuthenticationAttempt.unavailable_response
       rescue ActionController::UnknownFormat => e
         # Analyze unknown format as potential scanner
         if Beskar.configuration.waf_enabled?
-          handle_rails_exception(request, e, ip_address, is_whitelisted)
+          handle_rails_exception(request, e, ip_address, is_whitelisted) unless waf_recorded
         end
         # Re-raise to allow normal error handling
         raise
       rescue ActionDispatch::RemoteIp::IpSpoofAttackError => e
-        # Handle IP spoofing attack
-        if Beskar.configuration.waf_enabled?
-          handle_rails_exception(request, e, ip_address, is_whitelisted)
-        end
-        # Re-raise to allow normal error handling
+        # Attribute downstream errors only when Rails already resolved a trusted
+        # client IP. Never ban an address from a rejected proxy chain.
+        handle_rails_exception(request, e, ip_address, is_whitelisted) if !waf_recorded && ip_address && Beskar.configuration.waf_enabled?
         raise
       rescue ActiveRecord::RecordNotFound => e
         # Analyze record not found as potential enumeration scan
         if Beskar.configuration.waf_enabled?
-          handle_rails_exception(request, e, ip_address, is_whitelisted)
+          handle_rails_exception(request, e, ip_address, is_whitelisted) unless waf_recorded
         end
         # Re-raise to allow normal error handling
         raise
       rescue ActionDispatch::Http::MimeNegotiation::InvalidType => e
         # Analyze invalid MIME type as potential scanner
         if Beskar.configuration.waf_enabled?
-          handle_rails_exception(request, e, ip_address, is_whitelisted)
+          handle_rails_exception(request, e, ip_address, is_whitelisted) unless waf_recorded
         end
         # Re-raise to allow normal error handling
         raise
@@ -126,68 +130,26 @@ module Beskar
         end
         # Re-raise to allow normal 404 handling
         raise
+      rescue ActiveRecord::ActiveRecordError => error
+        raise if processing_host
+        Beskar::Logger.warn("Request security state unavailable (#{error.class})")
+        Beskar::Services::AuthenticationAttempt.unavailable_response
       end
 
       private
 
-      def rate_limited?(request)
-        # Check both IP rate limit and authentication abuse
-        ip_check = Beskar::Services::RateLimiter.check_ip_rate_limit(request.ip)
-        auth_abused = authentication_brute_force?(request.ip)
-
-        !ip_check[:allowed] || auth_abused
-      end
-
       def should_auto_block_rate_limit?(ip_address)
-        # Check how many times this IP has been rate limited in the past hour
-        cache_key = "beskar:rate_limit_violations:#{ip_address}"
-        violations = Rails.cache.read(cache_key) || 0
-        violations += 1
-        Rails.cache.write(cache_key, violations, expires_in: 1.hour)
-
-        # Block after 5 rate limit violations in an hour
-        violations >= 5
-      end
-
-      def authentication_brute_force?(ip_address)
-        # Check authentication failure count from RateLimiter
-        cache_key = "beskar:ip_auth_failures:#{ip_address}"
-
-        # Get current failure count and timestamp
-        failure_data = Rails.cache.read(cache_key)
-        return false unless failure_data.is_a?(Hash)
-
-        # Count recent failures (within the configured period)
-        config = Beskar.configuration.rate_limiting[:ip_attempts] || {}
-        period = config[:period] || 1.hour
-        limit = config[:limit] || 10
-
-        now = Time.current.to_i
-        recent_failures = failure_data.select { |timestamp, _| now - timestamp.to_i < period.to_i }
-
-        # If too many auth failures, it's brute force
-        if recent_failures.length >= limit
-          # Auto-ban for authentication abuse (create ban record even in monitor-only mode)
-          Beskar::BannedIp.ban!(
-            ip_address,
-            reason: "authentication_abuse",
-            duration: 1.hour,
-            details: "#{recent_failures.length} failed authentication attempts in #{period / 60} minutes",
-            metadata: {failure_count: recent_failures.length, detection_time: Time.current}
-          )
-
-          if Beskar.configuration.monitor_only?
-            Beskar::Logger.warn("🔍 MONITOR-ONLY: Would auto-block IP #{ip_address} " \
-              "for authentication brute force (#{recent_failures.length} failures), but monitor_only=true", component: :Middleware)
-          else
-            Beskar::Logger.warn("🔒 Auto-blocked IP #{ip_address} " \
-              "for authentication brute force (#{recent_failures.length} failures)", component: :Middleware)
-          end
-
-          return true
+        mode = Beskar.configuration.monitor_only? ? "observe" : "enforce"
+        key = "rate_denials:#{mode}:#{ip_address}"
+        Beskar::SecurityState.mutate(key, ttl: 1.hour) do |state|
+          data = state.fetch(key)
+          now = Time.current.to_f
+          # A fixed window: repeated requests cannot prolong old violations.
+          data.clear if data["window_end"] && data["window_end"] <= now
+          data["window_end"] ||= now + 1.hour
+          data["count"] = [data.fetch("count", 0) + 1, 5].min
+          data["count"] >= 5
         end
-
-        false
       end
 
       def handle_rails_exception(request, exception, ip_address, is_whitelisted)
@@ -225,14 +187,11 @@ module Beskar
       end
 
       def log_404_for_waf(request, error)
-        # 404s on suspicious paths might indicate scanning
-        path = request.fullpath || request.path
-
         # Only log if it matches WAF patterns (already analyzed in analyze_request)
         waf_analysis = Beskar::Services::Waf.analyze_request(request)
 
         if waf_analysis
-          Beskar::Logger.info("404 on suspicious path from #{request.ip}: #{path} " \
+          Beskar::Logger.info("404 matching WAF rules from #{Beskar::Services::RequestContext.ip(request)} " \
             "(WAF patterns: #{waf_analysis[:patterns].map { |p| p[:description] }.join(", ")})", component: :Middleware)
         end
       end
@@ -241,20 +200,20 @@ module Beskar
         [
           403,
           {
-            "Content-Type" => "text/html",
-            "X-Beskar-Blocked" => "true"
+            "content-type" => "text/html; charset=utf-8",
+            "x-beskar-blocked" => "true"
           },
           [render_blocked_page(message)]
         ]
       end
 
-      def rate_limit_response
+      def rate_limit_response(retry_after)
         [
           429,
           {
-            "Content-Type" => "text/html",
-            "Retry-After" => "3600",
-            "X-Beskar-Rate-Limited" => "true"
+            "content-type" => "text/html; charset=utf-8",
+            "retry-after" => [retry_after.to_i, 1].max.to_s,
+            "x-beskar-rate-limited" => "true"
           },
           [render_rate_limit_page]
         ]

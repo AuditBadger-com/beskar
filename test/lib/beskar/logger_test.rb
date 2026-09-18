@@ -179,8 +179,8 @@ class Beskar::LoggerTest < ActiveSupport::TestCase
     Beskar::Logger.info("This will fail")
 
     stderr_content = stderr_output.string
-    assert_match(/Failed to log message/, stderr_content)
-    assert_match(/Original message:.*This will fail/, stderr_content)
+    assert_match(/Logging unavailable \(RuntimeError\)/, stderr_content)
+    refute_match(/This will fail/, stderr_content)
   ensure
     $stderr = original_stderr if defined?(original_stderr)
   end

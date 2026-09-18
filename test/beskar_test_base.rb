@@ -7,7 +7,7 @@ class BeskarTestBase < ActiveSupport::TestCase
 
   def setup
     # Reset Beskar configuration to defaults before each test
-    Beskar.configuration = Beskar::Configuration.new
+    Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
 
     # Ensure security tracking is enabled by default for tests
     Beskar.configuration.security_tracking[:enabled] = true

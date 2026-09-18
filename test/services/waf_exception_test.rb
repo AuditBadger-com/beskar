@@ -6,8 +6,9 @@ class WafExceptionTest < ActiveSupport::TestCase
     Rails.cache.clear
     Beskar.configuration.waf = {
       enabled: true,
+      exception_detection: :all, # Broad exception scoring is now explicit opt-in.
       auto_block: true,
-      block_threshold: 3,
+      score_threshold: 150,
       violation_window: 1.hour,
       create_security_events: true,
       record_not_found_exclusions: [
@@ -21,7 +22,7 @@ class WafExceptionTest < ActiveSupport::TestCase
   def teardown
     Rails.cache.clear
     Beskar.configuration.waf = {enabled: false}
-    Beskar::SecurityEvent.destroy_all
+    Beskar::SecurityEvent.delete_all
     Beskar::BannedIp.destroy_all
   end
 
@@ -81,7 +82,7 @@ class WafExceptionTest < ActiveSupport::TestCase
     assert_equal "Invalid MIME type requested - potential scanner", analysis[:patterns].first[:description]
     assert_equal "192.168.1.100", analysis[:ip_address]
     assert_equal "ActionDispatch::Http::MimeNegotiation::InvalidType", analysis[:exception_class]
-    assert_includes analysis[:exception_message], "is not a valid MIME type"
+    refute analysis.key?(:exception_message)
   end
 
   test "excludes RecordNotFound for configured patterns" do
@@ -207,8 +208,8 @@ class WafExceptionTest < ActiveSupport::TestCase
       Beskar::Services::Waf.record_violation("192.168.1.100", analysis)
     end
 
-    # Ban record should be created even in monitor mode
-    assert Beskar::BannedIp.banned?("192.168.1.100")
+    # Monitor mode records evidence without creating an active ban.
+    assert_not Beskar::BannedIp.banned?("192.168.1.100")
 
     # But the ban should indicate it's in monitor mode via the logs
     # (actual blocking behavior is handled by middleware)

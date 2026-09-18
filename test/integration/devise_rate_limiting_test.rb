@@ -94,14 +94,7 @@ class DeviseRateLimitingTest < ActionDispatch::IntegrationTest
       }
     end
 
-    # Manually manipulate the cache to simulate time passing
-    cache_key = "beskar:ip_attempts:192.168.2.100"
-    Rails.cache.read(cache_key) || {}
-
-    # Simulate old attempts that should be outside the time window
-    old_timestamp = (Time.current - 2.hours).to_i
-    new_data = {old_timestamp => 10} # Old attempts that should expire
-    Rails.cache.write(cache_key, new_data, expires_in: 1.hour)
+    travel 2.hours
 
     # New attempt should be allowed since old attempts are outside window
     rate_limit_result = Beskar::Services::RateLimiter.check_ip_rate_limit("192.168.2.100")
@@ -187,8 +180,8 @@ class DeviseRateLimitingTest < ActionDispatch::IntegrationTest
           "X-Forwarded-For" => ip
         }
 
-        # Each request should fail authentication (422) since password is wrong
-        assert_response :unprocessable_content
+        expected = (ip_index * 3 + attempt < 5) ? :unprocessable_content : :too_many_requests
+        assert_response expected
       end
     end
 
@@ -199,6 +192,8 @@ class DeviseRateLimitingTest < ActionDispatch::IntegrationTest
       assert ip_result[:allowed], "Individual IP #{ip} should still be within limits (3/10 attempts)"
       assert_equal 3, ip_result[:count], "Should have exactly 3 attempts from IP #{ip}"
     end
+
+    assert_not Beskar::Services::RateLimiter.check_account_rate_limit(@user)[:allowed]
 
     # This test verifies that individual IPs are tracked separately
     # while account-based tracking would aggregate across all IPs
@@ -216,7 +211,7 @@ class DeviseRateLimitingTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "exponential backoff increases retry time with repeated violations" do
+  test "middleware rate limit previews do not escalate authentication backoff" do
     ip_address = worker_ip(60)
 
     # Make 15 authentication attempts (exceeds default limit of 10)
@@ -253,13 +248,9 @@ class DeviseRateLimitingTest < ActionDispatch::IntegrationTest
     # Verify attempt count
     assert rate_check[:count] >= 10, "Should have recorded at least 10 attempts (got #{rate_check[:count]})"
 
-    # Test that backoff mechanism exists
-    backoff_key = "beskar:ip_backoff:#{ip_address}"
-    backoff_count = Rails.cache.read(backoff_key)
-
-    # After being rate limited, backoff tracking should be in place
-    assert_not_nil backoff_count, "Backoff counter should exist for rate limited IP"
-    assert backoff_count >= 0, "Backoff count should be non-negative (got #{backoff_count})"
+    # Middleware previews must not escalate authentication backoff.
+    deadline = rate_check[:reset_time]
+    assert_equal deadline, Beskar::Services::RateLimiter.check_ip_rate_limit(ip_address)[:reset_time]
   end
 
   test "rate limiting allows requests after cooldown period" do
@@ -289,10 +280,7 @@ class DeviseRateLimitingTest < ActionDispatch::IntegrationTest
     blocked_check = Beskar::Services::RateLimiter.check_ip_rate_limit(ip_address)
     assert_equal false, blocked_check[:allowed]
 
-    # Simulate time passing by manipulating cache
-    cache_key = "beskar:ip_attempts:#{ip_address}"
-    # Clear the cache to simulate cooldown period expiring
-    Rails.cache.delete(cache_key)
+    travel 2.hours
 
     # Should be allowed again
     cooldown_check = Beskar::Services::RateLimiter.check_ip_rate_limit(ip_address)

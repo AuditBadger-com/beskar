@@ -5,7 +5,7 @@ class WafExceptionIntegrationTest < ActionDispatch::IntegrationTest
   def setup
     Rails.cache.clear
     Beskar::BannedIp.destroy_all
-    Beskar::SecurityEvent.destroy_all
+    Beskar::SecurityEvent.delete_all
 
     # Save original configuration
     @original_waf = Beskar.configuration.waf.dup
@@ -15,6 +15,7 @@ class WafExceptionIntegrationTest < ActionDispatch::IntegrationTest
     # Enable WAF with exception detection
     Beskar.configuration.waf = {
       enabled: true,
+      exception_detection: :all, # Exercise the opt-in broad exception adapter.
       auto_block: true,
       score_threshold: 150,
       violation_window: 6.hours,
@@ -41,7 +42,7 @@ class WafExceptionIntegrationTest < ActionDispatch::IntegrationTest
   def teardown
     Rails.cache.clear
     Beskar::BannedIp.destroy_all
-    Beskar::SecurityEvent.destroy_all
+    Beskar::SecurityEvent.delete_all
 
     # Restore original configuration
     Beskar.configuration.waf = @original_waf
@@ -69,16 +70,14 @@ class WafExceptionIntegrationTest < ActionDispatch::IntegrationTest
       middleware.call(env)
     end
 
-    # Verify WAF violations were recorded (one for path pattern, one for exception)
-    assert_equal 2, Beskar::SecurityEvent.count
-
-    # Find the exception-based event
-    exception_event = Beskar::SecurityEvent.find { |e| e.metadata["waf_analysis"]["exception_class"].present? }
+    # The same request is charged once, even if the application also raises.
+    assert_equal 1, Beskar::SecurityEvent.count
+    exception_event = Beskar::SecurityEvent.last
     assert_not_nil exception_event
     assert_equal "waf_violation", exception_event.event_type
     assert_equal "192.168.1.100", exception_event.ip_address
     assert_equal 60, exception_event.risk_score # Medium severity
-    assert_equal "ActionController::UnknownFormat", exception_event.metadata["waf_analysis"]["exception_class"]
+    assert_equal "rails_exceptions", exception_event.metadata["waf_analysis"]["patterns"].first["category"]
   end
 
   test "middleware catches IP spoofing exception as critical threat" do
@@ -171,7 +170,7 @@ class WafExceptionIntegrationTest < ActionDispatch::IntegrationTest
 
     status, headers, _body = middleware.call(env)
     assert_equal 403, status
-    assert_equal "true", headers["X-Beskar-Blocked"]
+    assert_equal "true", headers["x-beskar-blocked"]
   end
 
   test "monitor-only mode logs exceptions but doesn't block" do
@@ -194,8 +193,8 @@ class WafExceptionIntegrationTest < ActionDispatch::IntegrationTest
       end
     end
 
-    # Ban record should be created
-    assert Beskar::BannedIp.banned?(attacker_ip)
+    # Monitor observations must not create active bans.
+    assert_not Beskar::BannedIp.banned?(attacker_ip)
 
     # But subsequent requests should NOT be blocked in monitor-only mode
     normal_app = ->(_env) { [200, {}, ["OK"]] }

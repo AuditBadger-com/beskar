@@ -1,6 +1,7 @@
 require "test_helper"
 require "generators/beskar/install/install_generator"
 require "fileutils"
+require "open3"
 
 class InstallGeneratorTest < Rails::Generators::TestCase
   # Disable parallelization for generator tests due to filesystem operations
@@ -30,6 +31,8 @@ class InstallGeneratorTest < Rails::Generators::TestCase
       # Check for authentication configuration section
       assert_match(/DASHBOARD AUTHENTICATION/, content)
       assert_match(/config\.authenticate_admin/, content)
+      assert_match(/config\.audit_actor/, content)
+      assert_match(%r{docs/guides/audit-lifecycle\.md}, content)
 
       # Check for monitor_only mode configuration
       assert_match(/config\.monitor_only/, content)
@@ -58,8 +61,8 @@ class InstallGeneratorTest < Rails::Generators::TestCase
       # Verify RecordNotFound exclusions are documented
       assert_match(/record_not_found_exclusions/, content)
 
-      # Verify reference to configuration profiles
-      assert_match(/WAF_CONFIGURATION_PROFILES\.md/, content)
+      # Verify reference to the current WAF tuning guide
+      assert_match(%r{docs/guides/audit-and-waf\.md}, content)
       assert_match(/STRICT/, content)
       assert_match(/BALANCED/, content)
       assert_match(/PERMISSIVE/, content)
@@ -72,17 +75,9 @@ class InstallGeneratorTest < Rails::Generators::TestCase
     end
   end
 
-  test "generator sets monitor_only based on environment" do
-    # The generator uses Rails.env.development? at template eval time
-    # Just verify the template contains the correct ERB logic
+  test "generator defaults to monitor mode in every environment" do
     run_generator
-
-    # Read the template file directly to verify ERB logic
-    template_path = File.expand_path("../../lib/generators/beskar/install/templates/initializer.rb.tt", __dir__)
-    template_content = File.read(template_path)
-
-    assert_match(/config\.monitor_only = <%= Rails\.env\.development\? \? 'true' : 'false' %>/, template_content,
-      "Template should set monitor_only based on Rails.env.development?")
+    assert_file "config/initializers/beskar.rb", /config\.monitor_only = true/
   end
 
   test "generator does not reference obsolete block_threshold parameter" do
@@ -165,7 +160,6 @@ class InstallGeneratorTest < Rails::Generators::TestCase
     # Check that the generator file references documentation
     generator_file = File.read(File.expand_path("../../lib/generators/beskar/install/install_generator.rb", __dir__))
 
-    assert_match(/DASHBOARD\.md/, generator_file)
     assert_match(/README\.md/, generator_file)
     assert_match(/Beskar Installation Complete/, generator_file)
   end
@@ -180,6 +174,46 @@ class InstallGeneratorTest < Rails::Generators::TestCase
         RubyVM::InstructionSequence.compile(content)
       end
     end
+  end
+
+  test "generator copies every migration into the destination and is idempotent" do
+    source = File.expand_path("../../db/migrate", __dir__)
+    migration_names = Dir.glob("#{source}/*.rb").map { |file| File.basename(file).sub(/^\d+_/, "") }
+    run_generator
+    migration_names.each do |name|
+      files = Dir.glob(File.join(destination_root, "db/migrate/*_#{name}"))
+      assert_equal 1, files.size, "Expected one copied #{name}"
+      RubyVM::InstructionSequence.compile_file(files.first)
+    end
+    run_generator ["--skip"]
+    assert_equal migration_names.size, Dir.glob(File.join(destination_root, "db/migrate/*.rb")).size
+    assert_empty Dir.glob(File.join(destination_root, "*_db"))
+  end
+
+  test "copied migrations create security tables in a fresh database" do
+    run_generator
+    code = <<~RUBY
+      ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ARGV.fetch(0))
+      ActiveRecord::MigrationContext.new(ARGV.fetch(1)).migrate
+      connection = ActiveRecord::Base.connection
+      abort "missing state table" unless connection.table_exists?(:beskar_security_states)
+      abort "missing events table" unless connection.table_exists?(:beskar_security_events)
+      abort "missing bans table" unless connection.table_exists?(:beskar_banned_ips)
+      abort "missing administrative history" unless connection.table_exists?(:beskar_administrative_actions)
+      abort "missing operation index" unless connection.indexes(:beskar_administrative_actions).any? { |index| index.unique && index.columns == ["operation_id", "target_id"] }
+      abort "missing lock version" unless connection.columns(:beskar_security_states).any? { |column| column.name == "lock_version" }
+    RUBY
+    output, error, status = Open3.capture3(RbConfig.ruby, "-rbundler/setup", "-ractive_record", "-e", code,
+      File.join(destination_root, "fresh.sqlite3"), File.join(destination_root, "db/migrate"))
+    assert status.success?, "Fresh migration failed: #{output}\n#{error}"
+  end
+
+  test "generator respects migrations already copied by the engine rake task" do
+    run_generator
+    files = Dir.glob(File.join(destination_root, "db/migrate/*.rb"))
+    files.each { |file| File.rename(file, file.sub(/\.rb\z/, ".beskar.rb")) }
+    run_generator ["--skip"]
+    assert_equal files.size, Dir.glob(File.join(destination_root, "db/migrate/*.rb")).size
   end
 
   test "initializer contains all required configuration sections" do

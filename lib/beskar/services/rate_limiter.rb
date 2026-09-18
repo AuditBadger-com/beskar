@@ -13,175 +13,146 @@ module Beskar
           exponential_backoff: true
         },
         global_attempts: {
+          enabled: false,
           limit: 100,
           period: 1.minute
         }
       }.freeze
 
+      BACKOFF_DELAYS = [60, 300, 900, 3600, 14400, 86400].freeze
+
       class << self
-        def check_authentication_attempt(request, result, user = nil)
-          ip_address = request.ip
+        # Atomically reserve capacity across every applicable tier. :check is a
+        # read-only preview: it never counts an attempt or escalates backoff.
+        def check_authentication_attempt(request, result, user = nil, account_key: nil)
+          keys = keys_for(RequestContext.ip(request), user, account_key: account_key)
+          return preview(keys) if result == :check
 
-          # Check IP-based rate limiting
-          ip_result = check_ip_rate_limit(ip_address)
-
-          # Check account-based rate limiting if we have a user
-          account_result = user ? check_account_rate_limit(user) : {allowed: true}
-
-          # Check global rate limiting to prevent system overload
-          global_result = check_global_rate_limit
-
-          # Record the attempt
-          record_attempt(ip_address, result, user)
-
-          # Return most restrictive result
-          most_restrictive_result([ip_result, account_result, global_result])
+          reserve(keys)
         end
 
         def check_ip_rate_limit(ip_address)
-          config = Beskar.configuration.rate_limiting&.dig(:ip_attempts) || DEFAULT_CONFIG[:ip_attempts]
-          cache_key = "beskar:ip_attempts:#{ip_address}"
-          check_rate_limit(cache_key, config)
+          preview(keys_for(ip_address).slice(:ip_attempts))
         end
 
         def check_account_rate_limit(user)
-          config = Beskar.configuration.rate_limiting&.dig(:account_attempts) || DEFAULT_CONFIG[:account_attempts]
-          cache_key = "beskar:account_attempts:#{user.class.name}:#{user.id}"
-          check_rate_limit(cache_key, config)
+          preview(keys_for(nil, user).slice(:account_attempts))
+        end
+
+        def reserve_account(user, ip_address: nil, account_key: nil)
+          reserve(keys_for(ip_address, user, account_key: account_key).slice(:account_attempts))
         end
 
         def check_global_rate_limit
-          config = Beskar.configuration.rate_limiting&.dig(:global_attempts) || DEFAULT_CONFIG[:global_attempts]
-          cache_key = "beskar:global_attempts"
-          check_rate_limit(cache_key, config)
+          preview(keys_for(nil).slice(:global_attempts))
         end
 
         def is_rate_limited?(request, user = nil)
-          result = check_authentication_attempt(request, :check, user)
-          !result[:allowed]
+          !check_authentication_attempt(request, :check, user)[:allowed]
         end
 
         def time_until_allowed(request, user = nil)
-          result = check_authentication_attempt(request, :check, user)
-          result[:retry_after] || 0
+          check_authentication_attempt(request, :check, user)[:retry_after] || 0
         end
 
-        def reset_rate_limit(ip_address: nil, user: nil)
+        def reset_rate_limit(ip_address: nil, user: nil, global: false)
+          keys = keys_for(ip_address, user)
+          keys.delete(:global_attempts) unless global
           if ip_address
-            Rails.cache.delete("beskar:ip_attempts:#{ip_address}")
-            Rails.cache.delete("beskar:ip_backoff:#{ip_address}")
+            mode = Beskar.configuration.monitor_only? ? "observe" : "enforce"
+            keys[:denials] = "rate_denials:#{mode}:#{IPAddr.new(ip_address.to_s)}"
           end
+          return if keys.empty?
 
-          if user
-            cache_key = "beskar:account_attempts:#{user.class.name}:#{user.id}"
-            Rails.cache.delete(cache_key)
-            Rails.cache.delete("beskar:account_backoff:#{user.class.name}:#{user.id}")
-          end
+          SecurityState.mutate(keys.values, ttl: 1.second) { |state| state.each_value(&:clear) }
         end
 
         private
 
-        def check_rate_limit(cache_key, config)
-          now = Time.current.to_i
-          period = config[:period].to_i
-          limit = config[:limit]
-          window_start = now - period
+        def keys_for(ip_address, user = nil, account_key: nil)
+          keys = {}
+          mode = (Beskar.configuration.monitor_only? || IpWhitelist.whitelisted?(ip_address)) ? "observe" : "enforce"
+          keys[:ip_attempts] = "rate:#{mode}:ip:#{IPAddr.new(ip_address.to_s)}" if ip_address
+          keys[:account_attempts] = "rate:#{mode}:account:#{user.class.name}:#{user.id}" if user
+          keys[:account_attempts] ||= "rate:#{mode}:account:#{account_key}" if account_key
+          keys[:global_attempts] = "rate:#{mode}:global" if config_for(:global_attempts)[:enabled]
+          keys
+        end
 
-          # Get current window data
-          window_data = Rails.cache.read(cache_key) || {}
-
-          # Clean old entries
-          cleaned_data = window_data.select { |timestamp, _| timestamp.to_i > window_start }
-
-          # Update cache with cleaned data if it changed
-          if cleaned_data != window_data
-            if cleaned_data.empty?
-              Rails.cache.delete(cache_key)
-            else
-              Rails.cache.write(cache_key, cleaned_data, expires_in: period + 60)
-            end
+        def config_for(tier)
+          config = DEFAULT_CONFIG.fetch(tier).merge(Beskar.configuration.rate_limiting&.dig(tier) || {})
+          unless config[:limit].is_a?(Integer) && config[:limit].positive? && config[:period].to_f.positive?
+            raise ArgumentError, "Rate limits require a positive integer limit and positive period (#{tier})"
           end
+          config
+        end
 
-          current_count = cleaned_data.values.sum
+        def preview(keys)
+          now = Time.current.to_f
+          most_restrictive_result(keys.map do |tier, key|
+            evaluate(SecurityState.read(key), config_for(tier), now).merge(tier: tier)
+          end)
+        end
 
-          # Check if we're over the limit
-          if current_count >= limit
-            # Calculate retry after time with exponential backoff if configured
-            retry_after = calculate_retry_after(cache_key, config, current_count, limit)
-
-            reset_time = if cleaned_data.empty?
-              Time.at(now + period)
-            else
-              Time.at(cleaned_data.keys.map(&:to_i).min + period)
+        def reserve(keys)
+          configs = keys.to_h { |tier, _| [tier, config_for(tier)] }
+          ttl = [configs.values.map { |config| config[:period].to_f }.max, BACKOFF_DELAYS.last].max + 60
+          SecurityState.mutate(keys.values, ttl: ttl) do |state|
+            now = Time.current.to_f
+            results = keys.map do |tier, key|
+              config = configs.fetch(tier)
+              data = state.fetch(key)
+              data["attempts"] = recent_attempts(data, config, now)
+              result = evaluate(data, config, now)
+              if result[:allowed]
+                data.delete("denials")
+                data.delete("blocked_until")
+                # Bounded to the configured limit: denied traffic never grows the
+                # sliding window indefinitely or resets its expiration.
+                data["attempts"] << now
+              elsif config[:exponential_backoff]
+                index = [data.fetch("denials", 0), BACKOFF_DELAYS.length - 1].min
+                data["denials"] = [index + 1, BACKOFF_DELAYS.length].min
+                data["blocked_until"] = [data.fetch("blocked_until", 0), now + BACKOFF_DELAYS[index]].max
+                result = evaluate(data, config, now)
+              end
+              result.merge(tier: tier)
             end
+            most_restrictive_result(results)
+          end
+        end
 
-            {
-              allowed: false,
-              count: current_count,
-              limit: limit,
-              reset_time: reset_time,
-              retry_after: retry_after,
-              reason: "rate_limit_exceeded"
-            }
+        def recent_attempts(data, config, now)
+          Array(data["attempts"]).select { |timestamp| timestamp > now - config[:period].to_f }
+        end
+
+        def evaluate(data, config, now)
+          attempts = recent_attempts(data, config, now)
+          count = attempts.size
+          deadline = data.fetch("blocked_until", 0)
+          if count >= config[:limit]
+            # Enough entries must expire to bring the count below the limit.
+            deadline = [deadline, attempts.sort[count - config[:limit]] + config[:period].to_f].max
+          end
+          if deadline > now
+            {allowed: false, count: count, limit: config[:limit], remaining: 0,
+             reset_time: Time.at(deadline), retry_after: (deadline - now).ceil, reason: "rate_limit_exceeded"}
           else
-            {
-              allowed: true,
-              count: current_count,
-              limit: limit,
-              remaining: limit - current_count
-            }
+            {allowed: true, count: count, limit: config[:limit], remaining: config[:limit] - count}
           end
         end
 
+        # Compatibility for callers that record an outcome directly.
         def record_attempt(ip_address, result, user)
-          return if result == :check # Don't record check operations
-
-          now = Time.current.to_i
-
-          # Record IP attempt
-          ip_cache_key = "beskar:ip_attempts:#{ip_address}"
-          record_attempt_in_cache(ip_cache_key, now)
-
-          # Record account attempt if user exists
-          if user
-            account_cache_key = "beskar:account_attempts:#{user.class.name}:#{user.id}"
-            record_attempt_in_cache(account_cache_key, now)
-          end
-
-          # Record global attempt
-          global_cache_key = "beskar:global_attempts"
-          record_attempt_in_cache(global_cache_key, now, 1.minute)
-        end
-
-        def record_attempt_in_cache(cache_key, timestamp, expiry = 1.hour)
-          window_data = Rails.cache.read(cache_key) || {}
-          window_data[timestamp] = (window_data[timestamp] || 0) + 1
-          Rails.cache.write(cache_key, window_data, expires_in: expiry + 60)
-        end
-
-        def calculate_retry_after(cache_key, config, current_count, limit)
-          return 0 unless config[:exponential_backoff]
-
-          backoff_key = cache_key.gsub("_attempts:", "_backoff:")
-          failure_count = Rails.cache.read(backoff_key) || 0
-
-          # Increment failure count
-          Rails.cache.write(backoff_key, failure_count + 1, expires_in: 1.hour)
-
-          # Exponential backoff: 1min, 5min, 15min, 1hour, 4hours, 24hours
-          base_delays = [60, 300, 900, 3600, 14400, 86400] # in seconds
-          delay_index = [failure_count, base_delays.length - 1].min
-
-          base_delays[delay_index]
+          reserve(keys_for(ip_address, user)) unless result == :check
         end
 
         def most_restrictive_result(results)
-          # Find the most restrictive (not allowed) result
-          restricted = results.find { |r| !r[:allowed] }
-          return restricted if restricted
+          return {allowed: true, count: 0, remaining: Float::INFINITY, disabled: true} if results.empty?
+          denied = results.reject { |result| result[:allowed] }
+          return denied.max_by { |result| result[:retry_after] } if denied.any?
 
-          # If all are allowed, return the one with the lowest remaining count
-          results.min_by { |r| r[:remaining] || Float::INFINITY }
+          results.min_by { |result| result[:remaining] }
         end
       end
 
@@ -193,21 +164,24 @@ module Beskar
 
       def allowed?
         self.class.check_ip_rate_limit(@ip_address)[:allowed] &&
-          (@user.nil? || self.class.check_account_rate_limit(@user)[:allowed])
+          (@user.nil? || self.class.check_account_rate_limit(@user)[:allowed]) &&
+          self.class.check_global_rate_limit[:allowed]
       end
 
       def attempts_remaining
         ip_result = self.class.check_ip_rate_limit(@ip_address)
         account_result = @user ? self.class.check_account_rate_limit(@user) : {remaining: Float::INFINITY}
 
-        [ip_result[:remaining] || 0, account_result[:remaining] || 0].min
+        global_result = self.class.check_global_rate_limit
+        [ip_result[:remaining] || 0, account_result[:remaining] || 0, global_result[:remaining] || 0].min
       end
 
       def time_until_reset
         ip_result = self.class.check_ip_rate_limit(@ip_address)
         account_result = @user ? self.class.check_account_rate_limit(@user) : {retry_after: 0}
 
-        [ip_result[:retry_after] || 0, account_result[:retry_after] || 0].max
+        global_result = self.class.check_global_rate_limit
+        [ip_result[:retry_after] || 0, account_result[:retry_after] || 0, global_result[:retry_after] || 0].max
       end
 
       def reset!

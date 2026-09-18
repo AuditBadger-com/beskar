@@ -17,6 +17,14 @@ Minitest.backtrace_filter = Minitest::BacktraceFilter.new
 
 # Simple test isolation helper
 module TestHelper
+  # Explicit test-only bootstrap; production configuration is sealed at boot.
+  def self.configuration
+    Beskar::Configuration.new.tap do |config|
+      config.authorize_admin = ->(_request, _permission) { true }
+      config.audit_actor = ->(_request) { "test:admin" }
+    end
+  end
+
   # Get unique IP address for each test method to prevent interference
   def self.unique_ip_for_test(test_name, suffix = 1)
     # Use test name hash for deterministic but unique IP
@@ -35,7 +43,7 @@ class ActiveSupport::TestCase
   parallelize_setup do |worker|
     Rails.cache.clear
     # Reset Beskar configuration for each worker to prevent cross-test contamination
-    Beskar.configuration = Beskar::Configuration.new
+    Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
     Beskar.configuration.security_tracking[:enabled] = true
     Beskar.configuration.security_tracking[:track_successful_logins] = true
     Beskar.configuration.security_tracking[:track_failed_logins] = true
@@ -44,7 +52,7 @@ class ActiveSupport::TestCase
   parallelize_teardown do |worker|
     Rails.cache.clear
     # Reset configuration after worker finishes
-    Beskar.configuration = Beskar::Configuration.new
+    Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
   end
 
   # Reset configuration and cache before each test to ensure isolation
@@ -54,7 +62,7 @@ class ActiveSupport::TestCase
       # Clear cache to prevent cross-test pollution from WAF violations and banned IPs
       Rails.cache.clear
 
-      Beskar.configuration = Beskar::Configuration.new
+      Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
       Beskar.configuration.security_tracking[:enabled] = true
       Beskar.configuration.security_tracking[:track_successful_logins] = true
       Beskar.configuration.security_tracking[:track_failed_logins] = true
@@ -71,7 +79,7 @@ class ActionDispatch::IntegrationTest
   parallelize_setup do |worker|
     Rails.cache.clear
     # Reset Beskar configuration for each worker
-    Beskar.configuration = Beskar::Configuration.new
+    Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
     Beskar.configuration.security_tracking[:enabled] = true
     Beskar.configuration.security_tracking[:track_successful_logins] = true
     Beskar.configuration.security_tracking[:track_failed_logins] = true
@@ -80,7 +88,7 @@ class ActionDispatch::IntegrationTest
   parallelize_teardown do |worker|
     Rails.cache.clear
     # Reset configuration after worker finishes
-    Beskar.configuration = Beskar::Configuration.new
+    Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
   end
 
   setup do
@@ -91,7 +99,7 @@ class ActionDispatch::IntegrationTest
     Rails.cache.clear
 
     # Reset Beskar configuration before each integration test
-    Beskar.configuration = Beskar::Configuration.new
+    Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
     Beskar.configuration.security_tracking[:enabled] = true
     Beskar.configuration.security_tracking[:track_successful_logins] = true
     Beskar.configuration.security_tracking[:track_failed_logins] = true

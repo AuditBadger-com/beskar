@@ -1,0 +1,21 @@
+<% content_for :page_title, "Administrative Action ##{@administrative_action.id}" %>
+<% entry = @administrative_action %>
+<div class="card">
+  <div class="card-header"><h3 class="card-title"><%= entry.action.humanize %></h3></div>
+  <div class="card-body">
+    <dl>
+      <dt>Actor</dt><dd><%= entry.actor %></dd>
+      <dt>Reason</dt><dd><%= entry.reason %></dd>
+      <dt>Time</dt><dd><%= format_timestamp(entry.created_at) %></dd>
+      <dt>Target</dt><dd><%= entry.target_type %><%= " ##{entry.target_id}" if entry.target_id %></dd>
+      <dt>Operation ID</dt><dd><%= entry.operation_id %></dd>
+      <dt>Request ID</dt><dd><%= entry.request_id %></dd>
+    </dl>
+    <h4>Before</h4><pre><%= JSON.pretty_generate(entry.before_state) %></pre>
+    <h4>After</h4><pre><%= JSON.pretty_generate(entry.after_state) %></pre>
+    <% if entry.target_id %>
+      <%= link_to "History for this ban", administrative_actions_path(target_id: entry.target_id), class: "btn btn-secondary" %>
+    <% end %>
+    <%= link_to "All actions", administrative_actions_path, class: "btn btn-secondary" %>
+  </div>
+</div>

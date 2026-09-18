@@ -102,8 +102,8 @@ Beskar.configure do |config|
   #   %r{/public/.*}              # Public content
   # ]
   #
-  # === Pre-configured Profiles ===
-  # See WAF_CONFIGURATION_PROFILES.md for complete profile examples:
+  # === Illustrative thresholds ===
+  # See docs/guides/audit-and-waf.md for matching rules and tuning limitations:
   # - STRICT: score_threshold = 100 (high-security)
   # - BALANCED: score_threshold = 150 (recommended default)
   # - PERMISSIVE: score_threshold = 200 (high-traffic sites)
@@ -138,7 +138,7 @@ Beskar.configure do |config|
   # ============================================================================
   # Risk-based locking is disabled by default. To enable:
   # config.risk_based_locking[:enabled] = true
-  # config.risk_based_locking[:immediate_signout] = false  # Sign out users immediately when locked
+  # Confirmed locks always reject sign-in and revoke old sessions.
   # config.risk_based_locking[:risk_threshold] = 75        # Risk score threshold for locking
   # config.risk_based_locking[:auto_unlock_time] = 1.hour  # How long to lock the account
   # config.risk_based_locking[:notify_user] = true         # Notify user on lock

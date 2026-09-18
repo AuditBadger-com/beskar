@@ -1,0 +1,10 @@
+<%= form_with url: export_url, method: :get, local: true do %>
+  <% request.query_parameters.except("format", "audit_reason", "page", "per_page").each do |key, value| %>
+    <%= hidden_field_tag key, value if value.is_a?(String) %>
+  <% end %>
+  <%= label_tag :export_audit_reason, "Export reason" %>
+  <%= text_field_tag :audit_reason, nil, id: :export_audit_reason, required: true, maxlength: 1000 %>
+  <%= label_tag :export_format, "Export format" %>
+  <%= select_tag :format, options_for_select([["CSV", "csv"], ["JSON", "json"]]), id: :export_format %>
+  <%= submit_tag "Export", class: "btn btn-secondary" %>
+<% end %>

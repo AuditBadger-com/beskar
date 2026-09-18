@@ -2,7 +2,16 @@ require "csv"
 
 module Beskar
   class BannedIpsController < ApplicationController
-    before_action :set_banned_ip, only: [:show, :edit, :update, :destroy, :extend]
+    include Controllers::AuditExport
+
+    class ActorUnavailable < StandardError; end
+    before_action :set_banned_ip, only: [:show, :edit, :update, :destroy, :extend, :review]
+    before_action :prepare_administration, only: [:create, :update, :destroy, :extend, :bulk_action]
+    rescue_from ActorUnavailable, with: :administration_unavailable
+    rescue_from Services::AdministrativeBans::InvalidInput, Services::BanExpiry::InvalidInput do |error|
+      render plain: error.message, status: :unprocessable_content
+    end
+    rescue_from ActiveRecord::ActiveRecordError, with: :administration_unavailable
 
     def index
       @banned_ips = Beskar::BannedIp.order(banned_at: :desc)
@@ -21,18 +30,16 @@ module Beskar
 
     def show
       # Get related security events for this IP
-      @related_events = Beskar::SecurityEvent
-        .where(ip_address: @banned_ip.ip_address)
-        .order(created_at: :desc)
-        .limit(20)
+      events = Beskar::SecurityEvent.where(ip_address: @banned_ip.ip_address)
+      @related_events = events.preload(:user).order(created_at: :desc, id: :desc).limit(20)
 
       # Calculate statistics
       @stats = {
-        total_events: @related_events.count,
-        avg_risk_score: @related_events.average(:risk_score)&.round(1) || 0,
-        max_risk_score: @related_events.maximum(:risk_score) || 0,
-        first_seen: @related_events.minimum(:created_at),
-        last_seen: @related_events.maximum(:created_at)
+        total_events: events.count,
+        avg_risk_score: events.average(:risk_score)&.round(1) || 0,
+        max_risk_score: events.maximum(:risk_score) || 0,
+        first_seen: events.minimum(:created_at),
+        last_seen: events.maximum(:created_at)
       }
     end
 
@@ -44,116 +51,132 @@ module Beskar
 
     def create
       manager = BannedIpManager.new(create_params)
-      manager.create
-
-      if manager.success?
-        redirect_to banned_ip_path(manager.banned_ip),
-          notice: "IP address #{manager.banned_ip.ip_address} has been banned successfully."
-      else
-        @banned_ip = manager.banned_ip
-        render :new
-      end
+      @banned_ip = @administration.create!(manager.build)
+      redirect_to banned_ip_path(@banned_ip), notice: "IP address #{@banned_ip.ip_address} has been banned successfully."
+    rescue ActiveRecord::RecordInvalid => error
+      render_invalid_ban(error, :new)
     end
 
     def edit
     end
 
     def update
-      if @banned_ip.update(banned_ip_params)
-        redirect_to banned_ip_path(@banned_ip),
-          notice: "Ban for IP #{@banned_ip.ip_address} has been updated."
-      else
-        render :edit
+      attributes = banned_ip_params.to_h
+      if attributes.key?("expires_at")
+        attributes["expires_at"] = if ActiveModel::Type::Boolean.new.cast(attributes.fetch("permanent", @banned_ip.permanent?))
+          nil
+        else
+          Services::BanExpiry.parse(attributes["expires_at"])
+        end
+        # HTML datetime-local only represents milliseconds. Preserve the stored
+        # microseconds when the displayed value was submitted without a change.
+        current_expiry = @banned_ip.expires_at
+        if params[:expiry_precision] == "milliseconds" && current_expiry &&
+            attributes["expires_at"] == current_expiry.change(usec: current_expiry.usec / 1000 * 1000)
+          attributes["expires_at"] = current_expiry
+        end
       end
+      count = @administration.change!([@banned_ip.id], action: "update", attributes: attributes)
+      message = count.positive? ? "Ban for IP #{@banned_ip.ip_address} has been updated." : "No ban changes were necessary."
+      redirect_to banned_ip_path(@banned_ip), notice: message
+    rescue ActiveRecord::RecordInvalid => error
+      render_invalid_ban(error, :edit)
     end
 
     def destroy
       ip_address = @banned_ip.ip_address
-      @banned_ip.destroy
+      @administration.change!([@banned_ip.id], action: "unban")
 
       redirect_to banned_ips_path,
         notice: "IP address #{ip_address} has been unbanned."
     end
 
     def extend
-      # Default to 24 hours if no duration specified (e.g., from index page)
-      duration_param = params[:duration] || "24h"
+      action = (params[:duration] == "permanent") ? "make_permanent" : "extend"
+      @administration.change!([@banned_ip.id], action: action, duration: params[:duration] || "24h")
+      redirect_to banned_ip_path(@banned_ip), notice: "Ban updated and administrative action recorded."
+    end
 
-      duration = case duration_param
-      when "1h"
-        1.hour
-      when "6h"
-        6.hours
-      when "24h"
-        24.hours
-      when "7d"
-        7.days
-      when "30d"
-        30.days
-      when "permanent"
-        nil
-      else
-        24.hours
-      end
-
-      if duration_param == "permanent"
-        @banned_ip.update!(permanent: true, expires_at: nil)
-        message = "Ban for IP #{@banned_ip.ip_address} is now permanent."
-      else
-        # Ensure the ban can be extended (not already permanent)
-        if @banned_ip.permanent?
-          redirect_to banned_ip_path(@banned_ip), alert: "Cannot extend a permanent ban."
-          return
-        end
-
-        @banned_ip.extend_ban!(duration)
-        duration_text = (duration_param == "24h") ? "24 hours" : duration_param.gsub(/(\d+)([hd])/, '\1 \2').gsub("h", "hour(s)").gsub("d", "day(s)")
-        message = "Ban for IP #{@banned_ip.ip_address} has been extended by #{duration_text}."
-      end
-
-      redirect_to banned_ip_path(@banned_ip), notice: message
-    rescue => e
-      Rails.logger.error "Failed to extend ban: #{e.message}"
-      redirect_to banned_ip_path(@banned_ip), alert: "Failed to extend ban: #{e.message}"
+    def review
+      @operation = params[:operation]
+      head :bad_request unless %w[unban extend].include?(@operation)
     end
 
     def bulk_action
-      case params[:bulk_action]
-      when "unban"
-        unban_selected
-      when "make_permanent"
-        make_permanent_selected
-      when "extend"
-        extend_selected
-      else
-        redirect_to banned_ips_path, alert: "Unknown action."
-      end
+      action = params[:bulk_action]
+      raise Services::AdministrativeBans::InvalidInput, "Unknown bulk action" unless %w[unban extend make_permanent].include?(action)
+      count = @administration.change!(params[:ip_ids], action: action, duration: params[:duration])
+      description = {"unban" => "unbanned", "make_permanent" => "made permanent", "extend" => "extended"}.fetch(action)
+      redirect_to banned_ips_path, notice: "#{count} ban(s) #{description}; administrative actions recorded."
     end
 
     def export
       @banned_ips = Beskar::BannedIp.all
       apply_filters!
+      records = export_records(@banned_ips)
+      return if performed?
 
       respond_to do |format|
         format.csv do
-          send_data generate_csv(@banned_ips),
+          send_data generate_csv(records),
             filename: "banned-ips-#{Date.current}.csv",
             type: "text/csv"
         end
         format.json do
-          render json: @banned_ips.as_json(except: [:updated_at])
+          render json: records.map { |ban|
+            ban.attributes.slice("id", "ip_address", "reason", "details",
+              "permanent", "banned_at", "expires_at", "violation_count", "metadata", "created_at")
+          }
         end
       end
     end
 
     private
 
+    def ban_reason_options
+      options = [["Rate Limit Abuse", "rate_limit_abuse"], ["Authentication Abuse", "authentication_abuse"],
+        ["WAF Violation", "waf_violation"], ["Brute Force Attack", "brute_force_attack"],
+        ["Suspicious Activity", "suspicious_activity"], ["Manual Ban", "manual_ban"], ["Other", "other"]]
+      reason = @suggested_reason || @banned_ip.reason
+      options << [reason, reason] if reason.present? && options.none? { |_, value| value == reason }
+      options
+    end
+    helper_method :ban_reason_options
+
+    def prepare_administration
+      begin
+        callback = Beskar.configuration.audit_actor
+        actor = instance_exec(request, &callback) if callback
+        raise ActorUnavailable unless Services::AdministrativeBans.valid_actor?(actor)
+      rescue => error
+        Beskar::Logger.warn("Administrative actor unavailable (#{error.class})")
+        raise ActorUnavailable, "Administrative identity unavailable"
+      end
+      @administration = Services::AdministrativeBans.new(actor: actor, reason: params[:audit_reason], request_id: request.request_id)
+    end
+
+    def administration_unavailable(error)
+      return head :not_found if error.is_a?(ActiveRecord::RecordNotFound)
+      Beskar::Logger.warn("Administrative operation unavailable (#{error.class})")
+      render plain: "Administrative changes are unavailable. Reload state before retrying.", status: :service_unavailable
+    end
+
+    def render_invalid_ban(error, template)
+      return administration_unavailable(error) unless error.record.is_a?(BannedIp)
+      @banned_ip = error.record
+      render template, status: :unprocessable_content
+    end
+
     def set_banned_ip
       @banned_ip = Beskar::BannedIp.find(params[:id])
     end
 
     def banned_ip_params
-      params.require(:banned_ip).permit(
+      input = params.require(:banned_ip)
+      if input.key?(:expires_at) && !input[:expires_at].nil? && !input[:expires_at].is_a?(String)
+        raise Services::BanExpiry::InvalidInput, "Expiry must be a date and time string"
+      end
+      input.permit(
         :ip_address, :reason, :details, :permanent,
         :expires_at, :violation_count, metadata: {}
       )
@@ -209,61 +232,13 @@ module Beskar
       end
     end
 
-    def unban_selected
-      if params[:ip_ids].present?
-        banned_ips = Beskar::BannedIp.where(id: params[:ip_ids])
-        count = banned_ips.count
-
-        banned_ips.destroy_all
-
-        redirect_to banned_ips_path,
-          notice: "#{count} IP(s) have been unbanned."
-      else
-        redirect_to banned_ips_path, alert: "No IPs selected."
-      end
-    end
-
-    def make_permanent_selected
-      if params[:ip_ids].present?
-        count = Beskar::BannedIp.where(id: params[:ip_ids])
-          .update_all(permanent: true, expires_at: nil)
-
-        redirect_to banned_ips_path,
-          notice: "#{count} ban(s) have been made permanent."
-      else
-        redirect_to banned_ips_path, alert: "No IPs selected."
-      end
-    end
-
-    def extend_selected
-      if params[:ip_ids].present? && params[:duration].present?
-        banned_ips = Beskar::BannedIp.where(id: params[:ip_ids])
-
-        duration = case params[:duration]
-        when "24h" then 24.hours
-        when "7d" then 7.days
-        when "30d" then 30.days
-        else 24.hours
-        end
-
-        banned_ips.each do |banned_ip|
-          banned_ip.extend_ban!(duration)
-        end
-
-        redirect_to banned_ips_path,
-          notice: "#{banned_ips.count} ban(s) have been extended."
-      else
-        redirect_to banned_ips_path, alert: "No IPs selected or duration not specified."
-      end
-    end
-
     def generate_csv(banned_ips)
       require "csv"
 
-      CSV.generate(headers: true) do |csv|
+      CSV.generate(headers: true, force_quotes: true) do |csv|
         csv << ["IP Address", "Reason", "Banned At", "Expires At", "Status", "Violation Count", "Details"]
 
-        banned_ips.find_each do |ban|
+        banned_ips.each do |ban|
           csv << [
             ban.ip_address,
             ban.reason,
@@ -272,7 +247,7 @@ module Beskar
             ban.active? ? "Active" : "Expired",
             ban.violation_count,
             ban.details || "-"
-          ]
+          ].map { |value| Services::AuditData.csv_cell(value) }
         end
       end
     end

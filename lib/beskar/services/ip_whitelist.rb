@@ -7,33 +7,29 @@ module Beskar
         # Check if an IP address is whitelisted
         def whitelisted?(ip_address)
           return false if ip_address.blank?
-          return false unless whitelist_entries.any?
 
           ip = parse_ip(ip_address)
           return false unless ip
 
-          whitelist_entries.any? do |entry|
-            match_entry?(ip, entry)
+          parsed_entries.values.any? do |entry|
+            entry&.include?(ip)
           end
         rescue ArgumentError => e
-          Beskar::Logger.warn("Invalid IP address: #{ip_address} - #{e.message}", component: :IpWhitelist)
+          Beskar::Logger.warn("Invalid IP address: #{ip_address} - #{e.class}", component: :IpWhitelist)
           false
         end
 
         # Get whitelist entries from configuration
         def whitelist_entries
-          @whitelist_entries ||= begin
-            entries = Beskar.configuration.ip_whitelist || []
-            # Ensure it's an array
-            entries = [entries] unless entries.is_a?(Array)
-            entries.compact
-          end
+          entries = Beskar.configuration.ip_whitelist || []
+          # Ensure it's an array
+          entries = [entries] unless entries.is_a?(Array)
+          entries.compact
         end
 
         # Clear cached whitelist (useful when config changes)
         def clear_cache!
-          @whitelist_entries = nil
-          @parsed_entries = nil
+          @parsed_snapshot = nil
         end
 
         # Validate whitelist configuration
@@ -68,11 +64,6 @@ module Beskar
 
           entry_str = entry.to_s.strip
 
-          # Check if it's CIDR notation
-          if entry_str.include?("/")
-          else
-            # Single IP address
-          end
           IPAddr.new(entry_str)
         end
 
@@ -89,15 +80,20 @@ module Beskar
 
         # Cache parsed entries for performance
         def parsed_entries
-          @parsed_entries ||= begin
-            entries = {}
-            whitelist_entries.each do |entry|
-              entries[entry] = parse_entry(entry)
-            rescue ArgumentError => e
-              Beskar::Logger.warn("Skipping invalid entry: #{entry} - #{e.message}", component: :IpWhitelist)
-            end
-            entries
+          source = whitelist_entries
+          snapshot = @parsed_snapshot
+          return snapshot.last if snapshot && snapshot.first == source
+
+          entries = {}
+          source.each do |entry|
+            entries[entry] = parse_entry(entry)
+          rescue ArgumentError => e
+            Beskar::Logger.warn("Skipping invalid entry: #{entry} - #{e.class}", component: :IpWhitelist)
           end
+          # Publish the source and parsed entries together, never a half-updated
+          # cache that another request could mistake for the new configuration.
+          @parsed_snapshot = [source.deep_dup, entries]
+          entries
         end
       end
 

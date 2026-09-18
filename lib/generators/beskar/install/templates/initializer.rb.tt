@@ -21,19 +21,20 @@ Beskar.configure do |config|
   # Option 2: HTTP Basic Authentication (uses controller method)
   # config.authenticate_admin = ->(request) do
   #   authenticate_or_request_with_http_basic("Beskar Admin") do |username, password|
-  #     username == ENV['BESKAR_ADMIN_USERNAME'] &&
-  #     password == ENV['BESKAR_ADMIN_PASSWORD']
+  #     Beskar::Services::RequestContext.secure_match?(username, ENV['BESKAR_ADMIN_USERNAME']) &&
+  #       Beskar::Services::RequestContext.secure_match?(password, ENV['BESKAR_ADMIN_PASSWORD'])
   #   end
   # end
 
   # Option 3: Token-based authentication
   # config.authenticate_admin = ->(request) do
-  #   request.headers['Authorization'] == "Bearer #{ENV['BESKAR_ADMIN_TOKEN']}"
+  #   token = ENV['BESKAR_ADMIN_TOKEN']
+  #   token.present? && Beskar::Services::RequestContext.secure_match?(request.headers['Authorization'], "Bearer #{token}")
   # end
 
   # Option 4: Cookie-based authentication (uses controller cookies)
   # config.authenticate_admin = ->(request) do
-  #   cookies.signed[:admin_token] == ENV['BESKAR_ADMIN_TOKEN']
+  #   Beskar::Services::RequestContext.secure_match?(cookies.signed[:admin_token], ENV['BESKAR_ADMIN_TOKEN'])
   # end
 
   # Option 5: Using CanCanCan (uses controller method)
@@ -51,12 +52,30 @@ Beskar.configure do |config|
   #   Rails.env.development? || Rails.env.test?
   # end
 
+  # REQUIRED: grant permissions separately from authentication (nil denies all).
+  # config.authorize_admin = ->(request, permission) do
+  #   user = request.env['warden']&.user(scope: :user)
+  #   user&.admin? && user.beskar_permissions.include?(permission.to_s)
+  # end
+  # Adapt beskar_permissions to your host: read, manage_bans, export, read_audit.
+
+  # REQUIRED FOR DASHBOARD WRITES AND EXPORTS: resolve an authenticated operator.
+  # Adapt this example to the same trusted identity used by authenticate_admin.
+  # Never derive this from request params, emails, passwords, or tokens.
+  # Without audit_actor, separately authorized reads work; writes/exports return 503.
+  # config.audit_actor = ->(request) do
+  #   user = request.env['warden']&.user(scope: :user)
+  #   "User:#{user.id}" if user&.admin?
+  # end
+  # Forms require a reason and changes require transactional history.
+  # Apply the administrative-action migration; see docs/guides/audit-lifecycle.md.
+
   # ============================================================================
   # MONITOR-ONLY MODE
   # ============================================================================
   # When enabled, Beskar will log all security events but won't actually block
   # any requests. Useful for testing or initial deployment.
-  config.monitor_only = <%= Rails.env.development? ? 'true' : 'false' %>
+  config.monitor_only = true
 
   # ============================================================================
   # IP WHITELIST
@@ -71,7 +90,7 @@ Beskar.configure do |config|
   # ============================================================================
   # WAF (WEB APPLICATION FIREWALL) - Score-Based Blocking
   # ============================================================================
-  # Enable WAF to protect against common attacks and vulnerability scans.
+  # Enable scanner-path detection (not general SQL injection/XSS filtering).
   # Uses score-based blocking with exponential decay for intelligent threat detection.
   config.waf[:enabled] = true
 
@@ -82,6 +101,12 @@ Beskar.configure do |config|
   # config.waf[:block_durations] = [1.hour, 6.hours, 24.hours, 7.days] # Escalating durations
   # config.waf[:permanent_block_after] = 500       # Permanent block when cumulative score reaches this
   # config.waf[:create_security_events] = true     # Create SecurityEvent records
+  # config.waf[:exception_detection] = :suspicious # Ordinary Rails errors need scanner evidence
+  # config.waf[:request_exclusions] = [
+  #   {path: %r{\A/wp-content/}, methods: ["GET", "HEAD"], categories: [:wordpress_static]}
+  # ]
+  # WAF evidence excludes raw URLs and exception messages. Audit fields honor
+  # Rails filter_parameters. See docs/guides/audit-and-waf.md before opting into :all errors.
   #
   # === Exponential Decay Configuration ===
   # Violations decay over time based on severity (reduces false positives)
@@ -102,8 +127,8 @@ Beskar.configure do |config|
   #   %r{/public/.*}              # Public content
   # ]
   #
-  # === Pre-configured Profiles ===
-  # See WAF_CONFIGURATION_PROFILES.md for complete profile examples:
+  # === Illustrative thresholds ===
+  # See docs/guides/audit-and-waf.md for matching rules and tuning limitations:
   # - STRICT: score_threshold = 100 (high-security)
   # - BALANCED: score_threshold = 150 (recommended default)
   # - PERMISSIVE: score_threshold = 200 (high-traffic sites)
@@ -115,7 +140,11 @@ Beskar.configure do |config|
   # config.security_tracking[:enabled] = false
   # config.security_tracking[:track_successful_logins] = true
   # config.security_tracking[:track_failed_logins] = true
+  # No background analyzer is built in. Opt in with your own Active Job:
+  # config.security_tracking[:analysis_job] = "SecurityReviewJob"
   # config.security_tracking[:auto_analyze_patterns] = true
+  # The job receives user_type:, user_id:, event_type: after the outer commit.
+  # See docs/guides/configuration.md for the contract and queue/delivery limitations.
 
   # ============================================================================
   # RATE LIMITING
@@ -129,6 +158,8 @@ Beskar.configure do |config|
   # config.rate_limiting[:account_attempts][:period] = 15.minutes
   # config.rate_limiting[:account_attempts][:exponential_backoff] = true
   #
+  # config.rate_limiting[:global_attempts][:enabled] = false # Shared budget is opt-in
+  # config.rate_limiting[:ip_attempts][:block_requests] = false # Keep login quotas off unrelated requests
   # config.rate_limiting[:global_attempts][:limit] = 100
   # config.rate_limiting[:global_attempts][:period] = 1.minute
   # config.rate_limiting[:global_attempts][:exponential_backoff] = false
@@ -137,17 +168,22 @@ Beskar.configure do |config|
   # RISK-BASED ACCOUNT LOCKING
   # ============================================================================
   # Risk-based locking is disabled by default. To enable:
+  # Review docs/guides/risk-scoring.md: factors are heuristics; repeated IPs do not establish trust.
   # config.risk_based_locking[:enabled] = true
-  # config.risk_based_locking[:immediate_signout] = false  # Sign out users immediately when locked
+  # Confirmed locks always reject sign-in and revoke old sessions, including with legacy immediate_signout: false.
   # config.risk_based_locking[:risk_threshold] = 75        # Risk score threshold for locking
-  # config.risk_based_locking[:auto_unlock_time] = 1.hour  # How long to lock the account
-  # config.risk_based_locking[:notify_user] = true         # Notify user on lock
+  # config.risk_based_locking[:lock_strategy] = :devise_lockable # :rails_auth or :none also supported; :custom is rejected
+  # config.risk_based_locking[:auto_unlock_time] = 1.hour  # Native locks only; nil requires manual unlock
+  # Devise owns unlock_strategy/unlock_in. Configure those through Devise.
+  # Rails-native controllers/session readers need the guards in docs/guides/authentication.md.
+  # config.risk_based_locking[:notify_user] = true         # Opt-in email; configure notifications below first
   # config.risk_based_locking[:log_lock_events] = true     # Log lock events
 
   # ============================================================================
   # GEOLOCATION
   # ============================================================================
   # Geolocation uses a mock provider by default. To use MaxMind:
+  # Mock locations are synthetic and never trigger travel/country risk.
   # 1. Download GeoLite2-City database from maxmind.com
   # 2. Place it in config/GeoLite2-City.mmdb
   # 3. Configure:
@@ -171,7 +207,17 @@ Beskar.configure do |config|
   # config.emergency_password_reset[:impossible_travel_threshold] = 3
   # config.emergency_password_reset[:suspicious_device_threshold] = 5
   # config.emergency_password_reset[:total_locks_threshold] = 5
-  # config.emergency_password_reset[:send_notification] = true
-  # config.emergency_password_reset[:notify_security_team] = true
+  # config.emergency_password_reset[:send_notification] = true # Default false; requires notification settings
+  # config.emergency_password_reset[:notify_security_team] = true # Default false; requires team recipients
   # config.emergency_password_reset[:require_manual_unlock] = false
+
+  # ============================================================================
+  # NOTIFICATIONS (OPT-IN)
+  # ============================================================================
+  # config.notifications[:from] = "security@your-domain.example"
+  # config.notifications[:recovery_url] = "https://your-domain.example/account-recovery"
+  # config.notifications[:security_team_recipients] = ["security-team@your-domain.example"]
+  # Replace these values, configure Action Mailer, and run an Active Job worker
+  # consuming beskar_notifications. Recovery URLs are entry pages, never tokens.
+  # See docs/guides/notifications-and-recovery.md for retries and host recovery requirements.
 end

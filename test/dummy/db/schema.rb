@@ -10,7 +10,22 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2025_10_16_000002) do
+ActiveRecord::Schema[8.0].define(version: 2026_09_11_000001) do
+  create_table "beskar_administrative_actions", force: :cascade do |t|
+    t.string "actor", limit: 200, null: false
+    t.string "action", null: false
+    t.bigint "target_id", null: false
+    t.string "operation_id", limit: 36, null: false
+    t.string "request_id", limit: 200, null: false
+    t.text "reason", null: false
+    t.json "before_state", default: {}, null: false
+    t.json "after_state", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.index ["created_at"], name: "index_beskar_administrative_actions_on_created_at"
+    t.index ["operation_id", "target_id"], name: "index_beskar_actions_on_operation_target", unique: true
+    t.index ["target_id", "id"], name: "index_beskar_administrative_actions_on_target_id_and_id"
+  end
+
   create_table "beskar_banned_ips", force: :cascade do |t|
     t.string "ip_address", null: false
     t.string "reason", null: false
@@ -45,7 +60,19 @@ ActiveRecord::Schema[8.0].define(version: 2025_10_16_000002) do
     t.index ["ip_address", "event_type", "created_at"], name: "index_security_events_on_ip_event_time"
     t.index ["ip_address"], name: "index_beskar_security_events_on_ip_address"
     t.index ["risk_score"], name: "index_beskar_security_events_on_risk_score"
+    t.index ["user_type", "user_id", "event_type", "created_at"], name: "index_beskar_events_on_user_event_time"
     t.index ["user_type", "user_id"], name: "index_beskar_security_events_on_user"
+  end
+
+  create_table "beskar_security_states", force: :cascade do |t|
+    t.string "key", null: false
+    t.json "data", default: {}, null: false
+    t.datetime "expires_at"
+    t.integer "lock_version", default: 0, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["expires_at"], name: "index_beskar_security_states_on_expires_at"
+    t.index ["key"], name: "index_beskar_security_states_on_key", unique: true
   end
 
   create_table "devise_users", force: :cascade do |t|

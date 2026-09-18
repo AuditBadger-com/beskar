@@ -24,6 +24,11 @@ module Authentication
 
   def resume_session
     Current.session ||= find_session_by_cookie
+    if Current.session && !Beskar::Services::SessionRevocation.native_session_allowed?(Current.session, request: request)
+      Current.session = nil
+      cookies.delete(:session_id)
+    end
+    Current.session
   end
 
   def find_session_by_cookie

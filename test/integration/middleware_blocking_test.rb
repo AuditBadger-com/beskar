@@ -5,6 +5,7 @@ class MiddlewareBlockingTest < ActionDispatch::IntegrationTest
   def setup
     Rails.cache.clear
     Beskar::BannedIp.destroy_all
+    Beskar.configuration.rate_limiting[:ip_attempts][:block_requests] = true
 
     # Enable WAF and configure
     Beskar.configuration.waf = {
@@ -127,7 +128,7 @@ class MiddlewareBlockingTest < ActionDispatch::IntegrationTest
     ip = worker_ip(20)
     Beskar.configuration.waf[:enabled] = true
     Beskar.configuration.waf[:auto_block] = true
-    Beskar.configuration.waf[:block_threshold] = 3
+    Beskar.configuration.waf[:score_threshold] = 200
 
     # Make 3 violations to reach threshold
     3.times do
@@ -139,21 +140,23 @@ class MiddlewareBlockingTest < ActionDispatch::IntegrationTest
 
     # Should be blocked
     assert Beskar::BannedIp.banned?(ip), "IP should be banned after WAF threshold"
+    assert_equal 3, Beskar::Services::Waf.get_violation_count(ip)
+    assert_response :forbidden
   end
 
   test "WAF violations are logged but not blocked in monitor mode" do
     ip = worker_ip(21)
     Beskar.configuration.waf[:enabled] = true
     Beskar.configuration.monitor_only = true
-    Beskar.configuration.waf[:block_threshold] = 1
+    Beskar.configuration.waf[:score_threshold] = 75
 
     # Make multiple WAF violations
     5.times do
       get "/wp-admin/", headers: {"X-Forwarded-For" => ip}
     end
 
-    # Ban record should be created even in monitor mode
-    assert Beskar::BannedIp.banned?(ip), "Ban record should exist in monitor mode"
+    # Monitor mode records evidence without creating an active ban.
+    assert_not Beskar::BannedIp.banned?(ip)
 
     # But requests should still succeed (not blocked)
     get "/", headers: {"X-Forwarded-For" => ip}
@@ -216,46 +219,24 @@ class MiddlewareBlockingTest < ActionDispatch::IntegrationTest
   test "middleware blocks IPs after authentication brute force attempts" do
     ip = worker_ip(29)
 
-    # Simulate authentication failures tracked by RateLimiter
-    cache_key = "beskar:ip_auth_failures:#{ip}"
-    now = Time.current.to_i
-    failures = {}
-
-    # Record 15 failed authentication attempts (exceeds limit of 10)
-    15.times do |i|
-      failures[now - i] = 1
+    request = ActionDispatch::TestRequest.create("REMOTE_ADDR" => ip)
+    10.times { Beskar::Services::RateLimiter.check_authentication_attempt(request, :failure) }
+    5.times do
+      get "/", headers: {"X-Forwarded-For" => ip}
+      assert_response :too_many_requests
     end
 
-    Rails.cache.write(cache_key, failures, expires_in: 1.hour)
-
-    # Next request should detect brute force and block
-    get "/", headers: {"X-Forwarded-For" => ip}
-
-    # Should be auto-banned for authentication abuse
-    assert Beskar::BannedIp.banned?(ip), "IP should be banned after authentication brute force"
-
-    ban = Beskar::BannedIp.find_by(ip_address: ip)
-    assert_equal "authentication_abuse", ban.reason
-    assert_match(/failed authentication attempts/, ban.details)
+    assert Beskar::BannedIp.banned?(ip)
+    assert_equal "rate_limit_abuse", Beskar::BannedIp.find_by!(ip_address: ip).reason
   end
 
   test "authentication abuse blocking works independently of WAF" do
     ip = worker_ip(28)
-
-    # Disable WAF
     Beskar.configuration.waf[:enabled] = false
-
-    # Simulate authentication failures
-    cache_key = "beskar:ip_auth_failures:#{ip}"
-    now = Time.current.to_i
-    failures = {}
-    12.times { |i| failures[now - i] = 1 }
-    Rails.cache.write(cache_key, failures, expires_in: 1.hour)
-
-    # Should still block for auth abuse
-    get "/", headers: {"X-Forwarded-For" => ip}
-
-    assert Beskar::BannedIp.banned?(ip), "Should block auth abuse even when WAF is disabled"
+    request = ActionDispatch::TestRequest.create("REMOTE_ADDR" => ip)
+    10.times { Beskar::Services::RateLimiter.check_authentication_attempt(request, :failure) }
+    5.times { get "/", headers: {"X-Forwarded-For" => ip} }
+    assert Beskar::BannedIp.banned?(ip)
   end
 
   # Rate limiting with auto-block

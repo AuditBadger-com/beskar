@@ -165,43 +165,19 @@ module Beskar
         assert_equal 10, risk  # Should return moderate risk for unknown locations
       end
 
-      test "calculate_location_risk detects impossible travel" do
-        # Use mock provider for consistent test data
-        service = Beskar::Services::GeolocationService.new(provider: :mock)
-
-        # Mock two distant locations
-        ny_ip = "203.0.113.1"  # Will map to consistent mock location
-        london_ip = "203.0.113.2"  # Will map to different mock location
-
-        # Get the mock locations
-        ny_location = service.locate(ny_ip)
-        service.locate(london_ip)
-
-        # Calculate risk with short time difference (impossible travel)
-        risk = service.calculate_location_risk(london_ip, [ny_location], 3600)
-
-        # Should detect impossible travel and add significant risk
-        assert risk >= 25
+      test "calculate_location_risk detects impossible travel from a single elapsed observation" do
+        service = GeolocationService.new(provider: :maxmind)
+        ny = {country: "United States", country_code: "US", latitude: 40.7128, longitude: -74.0060}
+        london = {country: "United Kingdom", country_code: "GB", latitude: 51.5074, longitude: -0.1278}
+        service.stubs(:locate).returns(london)
+        assert_equal 30, service.calculate_location_risk("198.51.100.1", [ny.deep_stringify_keys], 3600)
       end
 
-      test "calculate_location_risk handles country changes" do
-        # Use mock provider for consistent test data
-        service = Beskar::Services::GeolocationService.new(provider: :mock)
-
-        # Use IPs that we know return different countries from mock provider
-        us_ip = "203.0.113.1"  # Mock provider returns US
-        uk_ip = "203.0.113.50" # Mock provider returns UK
-
-        us_location = service.locate(us_ip)
-        uk_location = service.locate(uk_ip)
-
-        # Verify we have different countries
-        assert_not_equal us_location[:country], uk_location[:country],
-          "Test requires different countries (got #{us_location[:country]} and #{uk_location[:country]})"
-
-        # Country change should add some risk
-        risk = service.calculate_location_risk(uk_ip, [us_location])
-        assert risk >= 10, "Country change should add at least 10 risk points (got #{risk})"
+      test "calculate_location_risk handles timestamped country changes" do
+        service = GeolocationService.new(provider: :maxmind)
+        service.stubs(:locate).returns(country: "United Kingdom", country_code: "GB")
+        previous = {location: {country: "United States", country_code: "US"}, occurred_at: 1.hour.ago}
+        assert_equal 10, service.calculate_location_risk("198.51.100.1", [previous])
       end
 
       test "calculate_location_risk caps at maximum" do
@@ -281,7 +257,7 @@ module Beskar
 
       # Test different providers
       test "initializes with different providers" do
-        providers = [:mock, :maxmind, :ip2location]
+        providers = [:mock, :maxmind]
 
         providers.each do |provider|
           # Clear cache to avoid interference between providers

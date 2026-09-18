@@ -1,0 +1,121 @@
+<%= javascript_tag nonce: true do %>
+  (() => {
+    // One delegated installation per document, even if a host evaluates the
+    // layout again. Native navigation is the dashboard's supported boundary.
+    if (window.beskarDashboardBehaviorInstalled) return;
+    window.beskarDashboardBehaviorInstalled = true;
+
+    function isPermanent(form) {
+      return form.querySelector('[name="ban_type"]:checked')?.value === 'permanent' ||
+        form.querySelector('[name="banned_ip[permanent]"]:checked')?.value === 'true';
+    }
+
+    function updateBanForm(form) {
+      const permanent = isPermanent(form);
+      const options = form.querySelector('#temporary-options');
+      options.hidden = permanent;
+      options.querySelectorAll('input, select, button').forEach(input => { input.disabled = permanent; });
+      const expiry = form.querySelector('#banned_ip_expires_at');
+      expiry.required = !permanent && !!form.querySelector('[name="banned_ip[permanent]"]');
+      const preview = document.getElementById('ban-preview');
+      if (!preview) return;
+      const ip = form.querySelector('#banned_ip_ip_address');
+      const reason = form.querySelector('#banned_ip_reason');
+      preview.hidden = !(ip.value || reason.value);
+      document.getElementById('preview-ip').textContent = ip.value || '-';
+      document.getElementById('preview-reason').textContent = reason.selectedOptions[0]?.textContent || '-';
+      const duration = form.querySelector('[name="duration"]:checked');
+      document.getElementById('preview-duration').textContent = permanent ? 'Permanent' :
+        (expiry.value ? `${expiry.value.replace('T', ' ')} UTC` : (duration?.parentElement.textContent.trim() || '24 hours (server default)'));
+      const status = document.getElementById('preview-status');
+      status.textContent = permanent ? 'Permanent' : 'Temporary';
+      status.className = permanent ? 'badge badge-critical' : 'badge badge-danger';
+    }
+
+    function updateSelection(form) {
+      const boxes = Array.from(form.querySelectorAll('.ban-checkbox'));
+      const count = boxes.filter(box => box.checked).length;
+      form.querySelector('#selected-count').textContent = count;
+      form.querySelector('#bulk-actions-bar').hidden = count === 0;
+      const all = form.querySelector('#select-all');
+      all.checked = boxes.length > 0 && count === boxes.length;
+      all.indeterminate = count > 0 && count < boxes.length;
+    }
+
+    function initialize() {
+      if (!document.querySelector('[data-beskar-dashboard]')) return;
+      document.querySelectorAll('[data-beskar-ban-form]').forEach(updateBanForm);
+      document.querySelectorAll('#bulk-actions-form').forEach(updateSelection);
+    }
+
+    document.addEventListener('change', event => {
+      if (!event.target.closest('[data-beskar-dashboard]')) return;
+      if (event.target.matches('[data-beskar-auto-submit]')) event.target.form.requestSubmit();
+      const form = event.target.closest('[data-beskar-ban-form]');
+      if (form) {
+        const expiry = form.querySelector('#banned_ip_expires_at');
+        if (event.target.name === 'duration') expiry.value = '';
+        if (event.target.name === 'banned_ip[permanent]' && !isPermanent(form) && !expiry.value) {
+          expiry.value = new Date(Date.now() + 86400000).toISOString().slice(0, -1);
+        }
+        updateBanForm(form);
+      }
+      const bulk = event.target.closest('#bulk-actions-form');
+      if (bulk) {
+        if (event.target.id === 'select-all') {
+          bulk.querySelectorAll('.ban-checkbox').forEach(box => { box.checked = event.target.checked; });
+        }
+        updateSelection(bulk);
+      }
+    });
+
+    document.addEventListener('input', event => {
+      const form = event.target.closest('[data-beskar-ban-form]');
+      if (!form) return;
+      if (event.target.id === 'banned_ip_expires_at' && event.target.value) {
+        form.querySelectorAll('[name="duration"]').forEach(input => { input.checked = false; });
+      }
+      updateBanForm(form);
+    });
+
+    document.addEventListener('click', event => {
+      if (!event.target.closest('[data-beskar-dashboard]')) return;
+      const clear = event.target.closest('[data-beskar-clear-selection]');
+      if (clear) {
+        const form = clear.closest('form');
+        form.querySelectorAll('.ban-checkbox').forEach(box => { box.checked = false; });
+        updateSelection(form);
+      }
+      const extend = event.target.closest('[data-beskar-extend-hours]');
+      if (extend) {
+        const form = extend.closest('form');
+        const expiry = form.querySelector('#banned_ip_expires_at');
+        // The displayed wall-clock value is UTC, never browser-local time.
+        const base = expiry.value ? Date.parse(`${expiry.value}Z`) : Date.now();
+        if (Number.isFinite(base)) {
+          expiry.value = new Date(Math.max(base, Date.now()) + Number(extend.dataset.beskarExtendHours) * 3600000).toISOString().slice(0, -1);
+          updateBanForm(form);
+        }
+      }
+      const permanent = event.target.closest('[data-beskar-make-permanent]');
+      if (permanent) {
+        const form = permanent.closest('form');
+        form.querySelector('[name="banned_ip[permanent]"][value="true"]').checked = true;
+        updateBanForm(form);
+      }
+    });
+
+    document.addEventListener('submit', event => {
+      if (!event.target.closest('[data-beskar-dashboard]')) return;
+      const message = event.submitter?.dataset.beskarConfirm;
+      if (message && !window.confirm(message)) event.preventDefault();
+      // Do not synthesize forms, bypass validation, or convert duration presets
+      // to client-clock timestamps. Rails forms carry CSRF and method fields.
+    });
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialize, { once: true });
+    else initialize();
+    document.addEventListener('pageshow', initialize);
+    document.addEventListener('turbo:load', initialize);
+  })();
+<% end %>

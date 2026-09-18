@@ -6,43 +6,35 @@ module Beskar
       @start_time = calculate_start_time(@time_range)
 
       # Overview statistics
+      events = Beskar::SecurityEvent.where(created_at: @start_time..Time.current)
+      @event_distribution = events.group(:event_type).count.sort_by { |_, count| -count }
+      score_counts = events.group(:risk_score).count
+      @risk_distribution = RiskLevel::RANGES.keys.to_h { |level| [level, 0] }
+      score_counts.each do |score, count|
+        level = RiskLevel.for(score)
+        @risk_distribution[level] += count if level
+      end
       @stats = {
-        total_events: Beskar::SecurityEvent.where("created_at >= ?", @start_time).count,
-        failed_logins: Beskar::SecurityEvent.where("created_at >= ?", @start_time).login_failures.count,
+        total_events: @event_distribution.sum(&:last),
+        failed_logins: @event_distribution.to_h.fetch("login_failure", 0),
         blocked_ips: Beskar::BannedIp.active.count,
-        high_risk_events: Beskar::SecurityEvent.where("created_at >= ?", @start_time).high_risk.count,
-        critical_threats: Beskar::SecurityEvent.where("created_at >= ?", @start_time).critical_risk.count
+        high_risk_events: @risk_distribution[:high] + @risk_distribution[:critical],
+        critical_threats: @risk_distribution[:critical]
       }
 
       # Recent activity
       @recent_events = Beskar::SecurityEvent
         .includes(:user)
-        .order(created_at: :desc)
+        .order(created_at: :desc, id: :desc)
         .limit(10)
 
       # Top threat IPs
-      @top_threat_ips = Beskar::SecurityEvent
-        .where("created_at >= ?", @start_time)
+      @top_threat_ips = events
         .group(:ip_address)
         .select("ip_address, COUNT(*) as event_count, AVG(risk_score) as avg_risk_score, MAX(risk_score) as max_risk_score")
         .having("COUNT(*) > 1")
         .order("event_count DESC, avg_risk_score DESC")
         .limit(5)
-
-      # Event types distribution
-      @event_distribution = Beskar::SecurityEvent
-        .where("created_at >= ?", @start_time)
-        .group(:event_type)
-        .count
-        .sort_by { |_, count| -count }
-
-      # Risk score distribution
-      @risk_distribution = {
-        low: Beskar::SecurityEvent.where("created_at >= ? AND risk_score < 30", @start_time).count,
-        medium: Beskar::SecurityEvent.where("created_at >= ? AND risk_score BETWEEN 30 AND 60", @start_time).count,
-        high: Beskar::SecurityEvent.where("created_at >= ? AND risk_score BETWEEN 61 AND 85", @start_time).count,
-        critical: Beskar::SecurityEvent.where("created_at >= ? AND risk_score > 85", @start_time).count
-      }
 
       # Currently active bans
       @active_bans = Beskar::BannedIp.active.order(banned_at: :desc).limit(5)

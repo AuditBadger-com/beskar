@@ -9,11 +9,21 @@ module Beskar
       included do
         # Include the generic functionality first
         include Beskar::Models::SecurityTrackableGeneric
+        prepend SessionCredentials
 
-        # Hook into Devise callbacks if Devise is present and available
-        if defined?(Devise) && respond_to?(:after_database_authentication)
-          # Track successful authentications
-          after_database_authentication :track_successful_login
+        after_update :revoke_beskar_sessions_after_lock
+
+        # The engine registers the single Warden outcome callback. Devise's
+        # after_database_authentication is an instance hook, not a callback macro.
+      end
+
+      module SessionCredentials
+        def authenticatable_salt
+          Digest::SHA256.hexdigest([super, beskar_session_token].to_json)
+        end
+
+        def rememberable_value
+          Digest::SHA256.hexdigest([super, beskar_session_token].to_json)
         end
       end
 
@@ -29,29 +39,29 @@ module Beskar
           track_authentication_event(current_request, :success)
         end
       rescue => e
-        Beskar::Logger.warn("Failed to track successful login: #{e.message}")
+        Beskar::Logger.warn("Failed to track successful login: #{e.class}")
         nil
       end
 
       # PUBLIC method called from Warden callback in engine.rb
       # Checks if account was just locked due to high risk and signs out if needed
-      def check_high_risk_lock_and_signout(auth)
+      def check_high_risk_lock_and_signout(auth, scope: nil, attempt: nil)
         return unless Beskar.configuration.risk_based_locking_enabled?
-
-        # Check if there's a very recent lock event (within last 5 seconds)
-        recent_lock = security_events
-          .where(event_type: ["account_locked", "lock_attempted"])
-          .where("created_at >= ?", 5.seconds.ago)
-          .exists?
-
-        if recent_lock
-          Beskar::Logger.warn("High-risk lock detected, signing out user #{id}")
-          auth.logout
-          throw :warden, message: :account_locked_due_to_high_risk
-        end
+        return unless scope
+        attempt ||= Services::AuthenticationAttempt.current(auth.request, scope) if auth.respond_to?(:request)
+        return unless attempt && attempt.user == self && attempt.scope == scope.to_s && attempt.locked_now
+        return unless Services::RequestContext.enforce?(attempt.ip_address)
+        auth.logout(scope)
+        throw :warden, scope: scope, message: :account_locked_due_to_high_risk
       end
 
       private
+
+      # Runs in the user save transaction, including Devise's own failed-password
+      # lock and ordinary updates of locked_at, not just Beskar risk-based locks.
+      def revoke_beskar_sessions_after_lock
+        revoke_beskar_sessions! if has_attribute?(:locked_at) && saved_change_to_locked_at? && locked_at.present?
+      end
 
       # Devise-specific: Try to get request from various Warden/Devise contexts
       def request_from_context
@@ -66,16 +76,15 @@ module Beskar
           Warden::Manager.current_request
         end
       rescue => e
-        Beskar::Logger.debug("Could not get request from context: #{e.message}")
+        Beskar::Logger.debug("Could not get request from context: #{e.class}")
         nil
       end
 
-      # Devise-specific: Handle high risk lock by creating lock event
+      # Devise-specific: The current attempt carries the completed lock result.
       # The actual sign-out is handled by Warden callback in engine.rb
       def handle_high_risk_lock(security_event, request)
         Beskar::Logger.debug("Devise account locked - Warden callback will handle sign-out")
-        # The lock event is already created by AccountLocker service
-        # The Warden callback will detect it and perform the actual sign-out
+        # The Warden callback uses the attempt, independently of audit writes.
       end
     end
   end

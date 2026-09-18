@@ -35,25 +35,11 @@
           Risk Score
         </div>
         <div style="display: flex; align-items: center; gap: 0.75rem;">
-          <span style="font-size: 24px; font-weight: 600; color: <%=
-            case @event.risk_score
-            when 0..30 then '#4CAF50'
-            when 31..60 then '#FF9800'
-            when 61..85 then '#E91E63'
-            else '#D32F2F'
-            end
-          %>;">
+          <span style="font-size: 24px; font-weight: 600; color: <%= risk_level_color(@event.risk_score) %>;">
             <%= @event.risk_score %>
           </span>
           <span class="badge badge-<%= risk_level_class(@event.risk_score) %>">
-            <%=
-              case @event.risk_score
-              when 0..30 then 'Low Risk'
-              when 31..60 then 'Medium Risk'
-              when 61..85 then 'High Risk'
-              else 'Critical'
-              end
-            %>
+            <%= risk_level_label(@event.risk_score) %>
           </span>
         </div>
       </div>
@@ -101,14 +87,14 @@
         </div>
         <% if @event.user %>
           <div style="font-size: 14px; color: #1A1F36;">
-            <%= @event.user.try(:email) || "User ##{@event.user_id}" %>
+            <%= audit_user_label(@event) %>
           </div>
           <div style="font-size: 13px; color: #697386; margin-top: 0.25rem;">
             ID: <%= @event.user_id %> • Type: <%= @event.user_type %>
           </div>
         <% elsif @event.attempted_email %>
           <div style="font-size: 14px; color: #697386;">
-            <%= @event.attempted_email %> <span style="font-size: 12px;">(attempted)</span>
+            <%= audit_user_label(@event) %> <span style="font-size: 12px;">(attempted)</span>
           </div>
         <% else %>
           <div style="color: #C1C7D0;">No user associated</div>
@@ -214,9 +200,9 @@
                 </td>
                 <td>
                   <% if event.user %>
-                    <%= event.user.try(:email) || "User ##{event.user_id}" %>
+                    <%= audit_user_label(event) %>
                   <% elsif event.attempted_email %>
-                    <span style="color: #697386;"><%= event.attempted_email %></span>
+                    <span style="color: #697386;"><%= audit_user_label(event) %></span>
                   <% else %>
                     <span style="color: #C1C7D0;">-</span>
                   <% end %>

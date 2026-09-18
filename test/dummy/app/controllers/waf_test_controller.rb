@@ -61,7 +61,7 @@ class WafTestController < ApplicationController
       waf_status: {
         enabled: Beskar.configuration.waf_enabled?,
         auto_block: Beskar.configuration.waf[:auto_block],
-        block_threshold: Beskar.configuration.waf[:block_threshold],
+        score_threshold: Beskar.configuration.waf[:score_threshold],
         monitor_only: Beskar.configuration.monitor_only?
       },
       violations: {

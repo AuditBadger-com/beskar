@@ -3,10 +3,7 @@
 <% content_for :header_actions do %>
   <div style="display: flex; gap: 0.5rem;">
     <%= link_to "+ New Ban", new_banned_ip_path, class: "btn btn-primary" %>
-    <%= link_to "Export CSV", export_banned_ips_path(format: :csv, params: request.query_parameters),
-        class: "btn btn-secondary" %>
-    <%= link_to "Export JSON", export_banned_ips_path(format: :json, params: request.query_parameters),
-        class: "btn btn-secondary" %>
+    <%= render "beskar/shared/export_form", export_url: export_banned_ips_path %>
   </div>
 <% end %>
 
@@ -76,15 +73,16 @@
   </div>
 
   <div style="display: flex; align-items: center; gap: 0.5rem;">
-    <label style="margin: 0; font-size: 13px; color: #697386;">Per page:</label>
+    <label for="per_page" style="margin: 0; font-size: 13px; color: #697386;">Per page:</label>
     <%= form_with url: banned_ips_path, method: :get, local: true, style: "display: inline;" do |f| %>
-      <% request.query_parameters.except(:per_page).each do |key, value| %>
+      <% request.query_parameters.except("per_page", "page").each do |key, value| %>
         <%= hidden_field_tag key, value %>
       <% end %>
       <%= select_tag :per_page,
           options_for_select([10, 25, 50, 100], params[:per_page]&.to_i || 25),
-          onchange: "this.form.submit();",
+          data: { beskar_auto_submit: true },
           style: "padding: 0.25rem 0.5rem; font-size: 13px;" %>
+      <%= submit_tag "Apply page size", class: "btn btn-sm btn-secondary" %>
     <% end %>
   </div>
 </div>
@@ -92,7 +90,7 @@
 <!-- Bulk Actions Form -->
 <%= form_with url: bulk_action_banned_ips_path, method: :post, local: true, id: "bulk-actions-form" do |f| %>
   <!-- Bulk Actions Bar -->
-  <div class="card" id="bulk-actions-bar" style="display: none; margin-bottom: 1rem;">
+  <div class="card" id="bulk-actions-bar" style="margin-bottom: 1rem;">
     <div class="card-body" style="padding: 0.75rem 1rem;">
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <div style="display: flex; align-items: center; gap: 1rem;">
@@ -100,13 +98,17 @@
             <span id="selected-count">0</span> items selected
           </span>
 
+          <div class="form-group">
+            <%= label_tag :audit_reason, "Administrative reason (all selected bans)" %>
+            <%= text_field_tag :audit_reason, nil, required: true, maxlength: 1000 %>
+          </div>
           <div style="display: flex; gap: 0.5rem;">
-            <%= submit_tag "Unban Selected", name: "bulk_action", value: "unban",
+            <%= button_tag "Unban Selected", name: "bulk_action", value: "unban",
                 class: "btn btn-sm btn-secondary",
-                onclick: "return confirm('Are you sure you want to unban the selected IPs?');" %>
-            <%= submit_tag "Make Permanent", name: "bulk_action", value: "make_permanent",
+                data: { beskar_confirm: "Unban all selected IPs?" } %>
+            <%= button_tag "Make Permanent", name: "bulk_action", value: "make_permanent",
                 class: "btn btn-sm btn-danger",
-                onclick: "return confirm('Are you sure you want to make the selected bans permanent?');" %>
+                data: { beskar_confirm: "Make all selected bans permanent?" } %>
 
             <div style="display: flex; align-items: center; gap: 0.25rem;">
               <%= select_tag :duration,
@@ -116,13 +118,13 @@
                     ['Extend by 30d', '30d']
                   ]),
                   style: "padding: 0.25rem 0.5rem; font-size: 13px;" %>
-              <%= submit_tag "Extend", name: "bulk_action", value: "extend",
+              <%= button_tag "Extend Selected", name: "bulk_action", value: "extend",
                   class: "btn btn-sm btn-warning" %>
             </div>
           </div>
         </div>
 
-        <button type="button" onclick="clearSelection()" class="btn btn-sm btn-secondary">
+        <button type="button" data-beskar-clear-selection class="btn btn-sm btn-secondary">
           Clear Selection
         </button>
       </div>
@@ -137,7 +139,7 @@
           <thead>
             <tr>
               <th style="width: 40px;">
-                <input type="checkbox" id="select-all" onchange="toggleSelectAll(this)">
+                <input type="checkbox" id="select-all" aria-label="Select all bans">
               </th>
               <th>IP Address</th>
               <th>Reason</th>
@@ -154,8 +156,7 @@
                 <tr>
                   <td>
                     <%= check_box_tag "ip_ids[]", ban.id, false,
-                        class: "ban-checkbox",
-                        onchange: "updateBulkActions()" %>
+                        class: "ban-checkbox", aria: { label: "Select ban #{ban.ip_address}" } %>
                   </td>
                   <td>
                     <div style="font-family: monospace; font-size: 14px; font-weight: 500;">
@@ -226,19 +227,11 @@
                           class: "btn btn-sm btn-secondary" %>
 
                       <% if ban.active? && !ban.permanent? %>
-                        <%= link_to "Extend", extend_banned_ip_path(ban, duration: '24h'),
-                            data: {
-                              "turbo-method": "post",
-                              "turbo-confirm": "Extend this ban by 24 hours?"
-                            },
+                        <%= link_to "Extend", review_banned_ip_path(ban, operation: 'extend', duration: '24h'),
                             class: "btn btn-sm btn-warning" %>
                       <% end %>
 
-                      <%= link_to "Unban", banned_ip_path(ban),
-                          data: {
-                            "turbo-method": "delete",
-                            "turbo-confirm": "Are you sure you want to unban #{ban.ip_address}?"
-                          },
+                      <%= link_to "Unban", review_banned_ip_path(ban, operation: 'unban'),
                           class: "btn btn-sm btn-danger" %>
                     </div>
                   </td>
@@ -324,38 +317,3 @@
     Total: <%= number_with_delimiter(@pagination[:total_count]) %> banned IPs
   </div>
 <% end %>
-
-<script>
-  function toggleSelectAll(checkbox) {
-    const checkboxes = document.querySelectorAll('.ban-checkbox');
-    checkboxes.forEach(cb => {
-      cb.checked = checkbox.checked;
-    });
-    updateBulkActions();
-  }
-
-  function updateBulkActions() {
-    const checkboxes = document.querySelectorAll('.ban-checkbox:checked');
-    const bulkBar = document.getElementById('bulk-actions-bar');
-    const selectedCount = document.getElementById('selected-count');
-
-    if (checkboxes.length > 0) {
-      bulkBar.style.display = 'block';
-      selectedCount.textContent = checkboxes.length;
-    } else {
-      bulkBar.style.display = 'none';
-    }
-
-    // Update select-all checkbox state
-    const selectAll = document.getElementById('select-all');
-    const allCheckboxes = document.querySelectorAll('.ban-checkbox');
-    if (allCheckboxes.length > 0) {
-      selectAll.checked = checkboxes.length === allCheckboxes.length;
-    }
-  }
-
-  function clearSelection() {
-    document.getElementById('select-all').checked = false;
-    toggleSelectAll(document.getElementById('select-all'));
-  }
-</script>

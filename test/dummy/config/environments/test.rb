@@ -34,6 +34,22 @@ Rails.application.configure do
   # Disable request forgery protection in test environment.
   config.action_controller.allow_forgery_protection = false
 
+  # Exercise the engine with nonce-only scripts, never unsafe-inline/eval.
+  # Existing view style attributes remain an explicit, separate CSP limitation.
+  config.content_security_policy do |policy|
+    policy.default_src :self
+    policy.script_src :self
+    policy.script_src_attr :none
+    policy.style_src :self
+    policy.style_src_attr :unsafe_inline
+    policy.img_src :self, :data
+    policy.object_src :none
+    policy.base_uri :self
+    policy.form_action :self
+  end
+  config.content_security_policy_nonce_generator = ->(_) { SecureRandom.base64(24) }
+  config.content_security_policy_nonce_directives = %w[script-src style-src]
+
   # Store uploaded files on the local file system in a temporary directory.
   config.active_storage.service = :test
 

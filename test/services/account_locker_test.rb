@@ -11,7 +11,7 @@ module Beskar
         )
 
         # Reset configuration to defaults
-        Beskar.configuration = Beskar::Configuration.new
+        Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
       end
 
       test "should not lock when risk-based locking is disabled" do
@@ -53,15 +53,16 @@ module Beskar
         assert @user.reload.access_locked?
       end
 
-      test "should handle custom lock strategy" do
+      test "unsupported custom strategy fails explicitly" do
         Beskar.configuration.risk_based_locking[:enabled] = true
         Beskar.configuration.risk_based_locking[:lock_strategy] = :custom
         Beskar.configuration.risk_based_locking[:risk_threshold] = 75
 
         locker = AccountLocker.new(@user, risk_score: 85, reason: :high_risk_login)
 
-        # Custom strategy not implemented, should return false
-        assert_not locker.lock!
+        assert_raises(Beskar::Configuration::Error) { locker.lock! }
+        assert_raises(Beskar::Configuration::Error) { locker.unlock! }
+        refute @user.reload.access_locked?
       end
 
       test "should not lock user twice" do
@@ -80,7 +81,7 @@ module Beskar
         Beskar.configuration.risk_based_locking[:enabled] = true
         Beskar.configuration.risk_based_locking[:log_lock_events] = true
         Beskar.configuration.risk_based_locking[:risk_threshold] = 75
-        Beskar.configuration.risk_based_locking[:lock_strategy] = :custom
+        Beskar.configuration.risk_based_locking[:lock_strategy] = :none
 
         locker = AccountLocker.new(
           @user,
@@ -89,7 +90,7 @@ module Beskar
           metadata: {ip_address: "192.168.1.1", user_agent: "Test Browser"}
         )
 
-        # Even though lock fails (custom not implemented), it should still log the attempt
+        # Explicitly disabled locking records an attempt, never a successful lock.
         initial_count = @user.security_events.count
         locker.lock!
 

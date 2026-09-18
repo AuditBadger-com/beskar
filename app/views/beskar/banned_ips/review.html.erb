@@ -1,0 +1,24 @@
+<% content_for :page_title, "Review ban action" %>
+<div class="card">
+  <div class="card-header"><h3 class="card-title"><%= @operation.titleize %> <%= @banned_ip.ip_address %></h3></div>
+  <div class="card-body">
+    <p>This change will be recorded with your administrative identity and its previous and resulting state.</p>
+    <%= form_with url: (@operation == "unban" ? banned_ip_path(@banned_ip) : extend_banned_ip_path(@banned_ip)),
+        method: (@operation == "unban" ? :delete : :post), local: true do %>
+      <% if @operation == "extend" %>
+        <div class="form-group">
+          <%= label_tag :duration, "Extension" %>
+          <%= select_tag :duration, options_for_select([['1 hour', '1h'], ['6 hours', '6h'], ['24 hours', '24h'],
+              ['7 days', '7d'], ['30 days', '30d'], ['Make permanent', 'permanent']], params[:duration] || '24h') %>
+        </div>
+      <% end %>
+      <div class="form-group">
+        <%= label_tag :audit_reason, "Reason for this administrative action" %>
+        <%= text_area_tag :audit_reason, nil, required: true, maxlength: 1000, rows: 3 %>
+        <p>Use a case reference or brief explanation. Do not include credentials or other secrets.</p>
+      </div>
+      <%= submit_tag "Confirm #{@operation}", class: "btn btn-danger" %>
+      <%= link_to "Cancel", banned_ip_path(@banned_ip), class: "btn btn-secondary" %>
+    <% end %>
+  </div>
+</div>

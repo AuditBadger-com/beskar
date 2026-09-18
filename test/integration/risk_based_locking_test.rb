@@ -9,7 +9,7 @@ class RiskBasedLockingTest < ActionDispatch::IntegrationTest
     )
 
     # Reset configuration to defaults
-    Beskar.configuration = Beskar::Configuration.new
+    Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
 
     # Clear any existing security events
     Beskar::SecurityEvent.delete_all

@@ -1,190 +1,149 @@
+require "ipaddr"
+
 module Beskar
   class BannedIp < ApplicationRecord
-    # Serialize metadata as JSON
     serialize :metadata, coder: JSON
 
     validates :ip_address, presence: true, uniqueness: true
-    validates :reason, presence: true
-    validates :banned_at, presence: true
+    validates :reason, :banned_at, presence: true
+    validates :expires_at, presence: true, unless: :permanent?
+    validates :violation_count, numericality: {only_integer: true, greater_than: 0}
+    validate :valid_ip_address
 
-    # Ensure metadata is always a hash
-    after_initialize do
-      self.metadata ||= {}
-    end
+    after_initialize { self.metadata ||= {} if has_attribute?(:metadata) }
+    before_validation :normalize_attributes
+    before_validation :sanitize_audit_fields
+    after_find :sanitize_audit_fields
+    after_commit :clear_legacy_cache
 
-    # Cache management callbacks
-    after_save :update_cache
-    after_destroy :clear_cache
-
-    scope :active, -> { where("expires_at IS NULL OR expires_at > ?", Time.current) }
+    # Permanent is authoritative even for legacy rows with an expired timestamp.
+    scope :active, -> { where("permanent = ? OR expires_at > ?", true, Time.current) }
     scope :permanent, -> { where(permanent: true) }
     scope :temporary, -> { where(permanent: false) }
-    scope :expired, -> { where("expires_at IS NOT NULL AND expires_at <= ?", Time.current) }
+    scope :expired, -> { temporary.where("expires_at <= ?", Time.current) }
     scope :by_reason, ->(reason) { where(reason: reason) }
 
-    # Check if a ban is currently active
     def active?
       permanent? || (expires_at.present? && expires_at > Time.current)
     end
 
-    # Check if ban has expired
+    def sanitize_audit_fields
+      self.reason = Services::AuditData.field(:reason, reason, limit: 100) if has_attribute?(:reason)
+      self.details = Services::AuditData.field(:details, details) if has_attribute?(:details)
+      self.metadata = Services::AuditData.metadata(metadata) if has_attribute?(:metadata)
+    end
+    private :sanitize_audit_fields
+
     def expired?
       !permanent? && expires_at.present? && expires_at <= Time.current
     end
 
-    # Extend ban duration (for repeat offenders)
     def extend_ban!(additional_time = nil)
-      self.violation_count += 1
-
-      if permanent?
-        # Already permanent, just increment violation count
-      elsif additional_time
-        self.expires_at = [expires_at || Time.current, Time.current].max + additional_time
-      else
-        # Calculate exponential backoff based on violation count
-        # 1 hour, 6 hours, 24 hours, 7 days, permanent
-        duration = case violation_count
-        when 1 then 1.hour
-        when 2 then 6.hours
-        when 3 then 24.hours
-        when 4 then 7.days
-        else
-          self.permanent = true
-          nil
-        end
-
-        if duration
-          self.expires_at = Time.current + duration
-        end
+      validate_duration!(additional_time)
+      SecurityState.mutate("ban:#{ip_address}", ttl: 1.day) do
+        reload
+        apply_extension(additional_time)
+        save!
       end
-      save!
     end
 
-    # Unban an IP address
     def unban!
-      destroy
+      destroy!
     end
 
-    # Class methods for ban management
     class << self
-      # Ban an IP address
       def ban!(ip_address, reason:, duration: nil, permanent: false, details: nil, metadata: {})
-        # Retry logic to handle race conditions when multiple requests try to ban the same IP
-        retries = 0
-        max_retries = 2
+        raise ArgumentError, "Ban duration must be positive" if duration && !duration.to_f.positive?
+        raise ArgumentError, "Ban requires a single IP address" if ip_address.to_s.include?("/")
+        ip_address = IPAddr.new(ip_address.to_s).to_s
 
-        begin
+        SecurityState.mutate("ban:#{ip_address}", ttl: 1.day) do
           banned_ip = find_or_initialize_by(ip_address: ip_address)
-
           if banned_ip.persisted?
-            # Existing ban - extend it
-            banned_ip.extend_ban!(duration)
+            banned_ip.permanent = true if permanent
+            banned_ip.send(:apply_extension, duration)
+            banned_ip.reason = reason
             banned_ip.details = details if details
-            # Deep stringify keys to avoid duplicate key issues
-            if metadata.any?
-              banned_ip.metadata = banned_ip.metadata.deep_stringify_keys.merge(metadata.deep_stringify_keys)
-            end
+            banned_ip.metadata = banned_ip.metadata.deep_stringify_keys.merge(metadata.deep_stringify_keys)
           else
-            # New ban
             banned_ip.assign_attributes(
-              reason: reason,
-              banned_at: Time.current,
-              expires_at: permanent ? nil : (Time.current + (duration || 1.hour)),
-              permanent: permanent,
-              details: details,
-              metadata: metadata
+              reason: reason, banned_at: Time.current, permanent: permanent,
+              expires_at: permanent ? nil : Time.current + (duration || 1.hour),
+              details: details, metadata: metadata
             )
           end
           banned_ip.save!
-
-          # Update cache
-          cache_key = "beskar:banned_ip:#{ip_address}"
-          Rails.cache.write(cache_key, true, expires_in: permanent ? nil : (duration || 1.hour))
-
           banned_ip
-        rescue ActiveRecord::RecordInvalid => e
-          # Race condition: another request created the record between find and save
-          if e.message.include?("Ip address has already been taken") && retries < max_retries
-            retries += 1
-            # Small random delay to reduce contention (1-10ms)
-            sleep(rand(1..10) / 1000.0)
-            retry
-          else
-            # Re-raise if it's a different validation error or we've exceeded retries
-            raise
-          end
         end
       end
 
-      # Check if an IP is banned (cache-first approach)
+      # Cache eviction, rollback, stale values, or process-local caches cannot
+      # change enforcement. All workers consult the same indexed database.
       def banned?(ip_address)
-        # Check cache first for performance
-        cache_key = "beskar:banned_ip:#{ip_address}"
-        cached_result = Rails.cache.read(cache_key)
-        return true if cached_result == true
-        return false if cached_result == false
-
-        # Check database
-        banned_record = active.find_by(ip_address: ip_address)
-        is_banned = banned_record&.active? || false
-
-        # Update cache
-        if is_banned && banned_record
-          ttl = banned_record.permanent? ? 30.days : (banned_record.expires_at - Time.current).to_i
-          Rails.cache.write(cache_key, true, expires_in: ttl)
-        else
-          Rails.cache.write(cache_key, false, expires_in: 5.minutes)
-        end
-
-        is_banned
+        return false if ip_address.to_s.include?("/")
+        active.exists?(ip_address: IPAddr.new(ip_address.to_s).to_s)
+      rescue IPAddr::InvalidAddressError
+        false
       end
 
-      # Unban an IP address
       def unban!(ip_address)
-        banned_ip = find_by(ip_address: ip_address)
-        if banned_ip
-          banned_ip.destroy
-          # Clear cache
-          Rails.cache.delete("beskar:banned_ip:#{ip_address}")
-          true
-        else
-          false
-        end
+        banned_ip = find_by(ip_address: IPAddr.new(ip_address.to_s).to_s)
+        return false unless banned_ip
+        banned_ip.destroy!
+        true
       end
 
-      # Load all active bans into cache (called on app startup)
+      # Kept for compatibility; no enforcement state lives in Rails.cache.
       def preload_cache!
-        active.find_each do |banned_ip|
-          cache_key = "beskar:banned_ip:#{banned_ip.ip_address}"
-          ttl = banned_ip.permanent? ? 30.days : [(banned_ip.expires_at - Time.current).to_i, 60].max
-          Rails.cache.write(cache_key, true, expires_in: ttl)
-        end
       end
 
-      # Clean up expired bans
       def cleanup_expired!
-        expired.destroy_all
+        expired.find_each do |ban|
+          ban.with_lock { ban.destroy! if ban.expired? }
+        end
       end
     end
 
     private
 
-    def update_cache
-      return unless active?
-
-      cache_key = "beskar:banned_ip:#{ip_address}"
-      ttl = calculate_cache_ttl
-      Rails.cache.write(cache_key, true, expires_in: ttl)
+    def apply_extension(additional_time)
+      self.violation_count += 1
+      if permanent?
+        self.expires_at = nil
+      elsif additional_time
+        self.expires_at = [expires_at || Time.current, Time.current].max + additional_time
+      elsif violation_count >= 5
+        self.permanent = true
+        self.expires_at = nil
+      else
+        self.expires_at = Time.current + [1.hour, 6.hours, 24.hours, 7.days].fetch(violation_count - 1)
+      end
     end
 
-    def clear_cache
-      Rails.cache.delete("beskar:banned_ip:#{ip_address}")
+    def validate_duration!(duration)
+      raise ArgumentError, "Ban duration must be positive" if duration && !duration.to_f.positive?
     end
 
-    def calculate_cache_ttl
-      return nil if permanent? || expires_at.nil?
+    def normalize_attributes
+      self.expires_at = nil if permanent?
+      self.ip_address = IPAddr.new(ip_address.to_s).to_s if ip_address.present? && !ip_address.include?("/")
+    rescue IPAddr::InvalidAddressError
+      # Validation reports malformed addresses without raising.
+    end
 
-      (expires_at - Time.current).to_i
+    def valid_ip_address
+      raise IPAddr::InvalidAddressError if ip_address.to_s.include?("/")
+      IPAddr.new(ip_address.to_s)
+    rescue IPAddr::InvalidAddressError
+      errors.add(:ip_address, "must be a valid individual IP address")
+    end
+
+    def clear_legacy_cache
+      [ip_address, previous_changes.dig("ip_address", 0)].compact.uniq.each do |ip|
+        Rails.cache.delete("beskar:banned_ip:#{ip}")
+      end
+    rescue => error
+      Beskar::Logger.warn("Legacy ban cache invalidation failed (#{error.class})", component: :BannedIp)
     end
   end
 end

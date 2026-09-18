@@ -22,7 +22,7 @@ class DeviseAttackPatternsTest < ActionDispatch::IntegrationTest
     attack_ips = ["203.1.113.1", "203.1.113.2", "203.1.113.3", "203.1.113.4"]
 
     # Simulate distributed brute force attack by creating failed login attempts
-    attack_ips.each do |ip|
+    attack_ips.each_with_index do |ip, index|
       3.times do |attempt|
         post "/devise_users/sign_in", params: {
           devise_user: {
@@ -34,13 +34,12 @@ class DeviseAttackPatternsTest < ActionDispatch::IntegrationTest
           "X-Forwarded-For" => ip
         }
 
-        # All attempts should fail since we're using wrong passwords
-        assert_response :unprocessable_content
+        assert_response((index * 3 + attempt < 5) ? :unprocessable_content : :too_many_requests)
       end
     end
 
     # Should have created security events for all failed attempts
-    events = Beskar::SecurityEvent.where(attempted_email: target_email)
+    events = Beskar::SecurityEvent.where(user: @target_user)
     assert events.count >= 12, "Expected at least 12 security events for distributed attack"
 
     # Verify events were created across multiple IPs
@@ -216,7 +215,7 @@ class DeviseAttackPatternsTest < ActionDispatch::IntegrationTest
 
     target_email = @target_user.email
 
-    botnet_ips.each do |ip|
+    botnet_ips.each_with_index do |ip, index|
       post "/devise_users/sign_in", params: {
         devise_user: {
           email: target_email,
@@ -227,11 +226,11 @@ class DeviseAttackPatternsTest < ActionDispatch::IntegrationTest
         "X-Forwarded-For" => ip
       }
 
-      assert_response :unprocessable_content
+      assert_response((index < 5) ? :unprocessable_content : :too_many_requests)
     end
 
     # Verify botnet attack detection
-    events = Beskar::SecurityEvent.where(attempted_email: target_email)
+    events = Beskar::SecurityEvent.where(user: @target_user)
     assert events.count >= 8, "Expected security events for each botnet attempt"
 
     unique_ips = events.pluck(:ip_address).uniq
@@ -271,7 +270,8 @@ class DeviseAttackPatternsTest < ActionDispatch::IntegrationTest
 
     # Verify different email addresses were attempted
     attempted_emails = events.pluck(:attempted_email).compact.uniq
-    assert attempted_emails.length >= 5, "Expected multiple different email addresses"
+    assert_equal ["[FILTERED]"], attempted_emails
+    assert_equal 5, Beskar::SecurityState.where("key LIKE ?", "rate:enforce:account:%:credentials:%").count
 
     # Verify risk scores reflect enumeration pattern
     enum_events = events.where("user_agent LIKE ?", "%Enum%")

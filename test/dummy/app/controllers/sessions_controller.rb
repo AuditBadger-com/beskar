@@ -3,25 +3,14 @@ class SessionsController < ApplicationController
   include Beskar::Controllers::SecurityTracking
 
   allow_unauthenticated_access only: %i[new create]
-  rate_limit to: 10, within: 3.minutes, only: :create, with: -> {
-    # Track rate limit hit as a security event
-    begin
-      track_authentication_failure(User, :user)
-    rescue
-      nil
-    end
-    redirect_to new_session_url, alert: "Try again later."
-  }
+  before_action -> { admit_authentication_attempt(User, :user) }, only: :create
 
   def new
   end
 
   def create
     if (user = User.authenticate_by(params.permit(:email_address, :password)))
-      # Track successful authentication before creating session
-      track_authentication_success(user)
-
-      start_new_session_for user
+      return unless complete_authentication(user) { start_new_session_for(user) }
       redirect_to after_authentication_url
     else
       # Track failed authentication attempt

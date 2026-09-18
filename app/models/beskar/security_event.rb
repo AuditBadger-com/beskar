@@ -1,6 +1,10 @@
 module Beskar
   class SecurityEvent < ApplicationRecord
+    # Transient correlation; the audit row is not enforcement authority.
+    attr_accessor :beskar_attempt
     belongs_to :user, polymorphic: true, optional: true
+    before_validation :sanitize_audit_fields
+    after_find :sanitize_audit_fields
 
     validates :event_type, presence: true
     validates :ip_address, presence: true
@@ -10,15 +14,32 @@ module Beskar
     scope :login_successes, -> { where(event_type: "login_success") }
     scope :recent, ->(time = 1.hour.ago) { where("created_at >= ?", time) }
     scope :by_ip, ->(ip) { where(ip_address: ip) }
-    scope :high_risk, -> { where("risk_score >= ?", 70) }
-    scope :critical_risk, -> { where("risk_score >= ?", 90) }
+    scope :high_risk, -> { where(risk_score: RiskLevel::RANGES[:high].begin..100) }
+    scope :critical_risk, -> { where(risk_score: RiskLevel::RANGES[:critical]) }
+    scope :with_risk_level, ->(level) {
+      range = RiskLevel::RANGES.find { |name, _| name.to_s == level.to_s }&.last
+      range ? where(risk_score: range) : all
+    }
+
+    def readonly?
+      persisted? || super
+    end
+
+    def delete
+      raise ActiveRecord::ReadOnlyRecord, "Security events are append-only" if persisted?
+      super
+    end
+
+    def risk_level
+      RiskLevel.for(risk_score)
+    end
 
     def critical_threat?
-      risk_score >= 90
+      risk_level == :critical
     end
 
     def high_risk?
-      risk_score >= 70
+      [:high, :critical].include?(risk_level)
     end
 
     def login_failure?
@@ -59,6 +80,15 @@ module Beskar
         metadata["error"] ||
         metadata["info"] ||
         nil
+    end
+
+    private
+
+    def sanitize_audit_fields
+      self.metadata = Services::AuditData.metadata(metadata) if has_attribute?(:metadata)
+      {event_type: 100, ip_address: 64, user_agent: 500, attempted_email: 320}.each do |field, limit|
+        self[field] = Services::AuditData.field(field, self[field], limit: limit) if has_attribute?(field)
+      end
     end
   end
 end

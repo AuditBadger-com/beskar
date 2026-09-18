@@ -6,7 +6,7 @@ module Beskar
 
     setup do
       # Clear any existing data
-      Beskar::SecurityEvent.destroy_all
+      Beskar::SecurityEvent.delete_all
       Beskar::BannedIp.destroy_all
 
       # Set up the routes for the engine
@@ -15,7 +15,7 @@ module Beskar
 
     teardown do
       # Reset configuration
-      Beskar.configuration = Beskar::Configuration.new
+      Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
     end
 
     # ===================
@@ -38,6 +38,15 @@ module Beskar
       assert_response :not_found
     end
 
+    test "authentication callback may complete a challenge without double rendering" do
+      Beskar.configuration.authenticate_admin = proc do
+        head :unauthorized
+        false
+      end
+      get "/beskar/dashboard"
+      assert_response :unauthorized
+    end
+
     test "denies access when custom authentication returns nil" do
       Beskar.configuration.authenticate_admin = ->(_request) {}
 
@@ -58,14 +67,15 @@ module Beskar
 
     test "logs error when custom authentication raises exception" do
       Beskar.configuration.authenticate_admin = ->(_request) do
-        raise ArgumentError, "Invalid token format"
+        raise ArgumentError, "Invalid token format: SECRET_AUTH_TOKEN"
       end
 
-      Rails.logger.expects(:error).with(regexp_matches(/Invalid token format/))
+      Rails.logger.expects(:error).with("Beskar authentication error: ArgumentError")
 
       get "/beskar/dashboard"
 
       assert_response :not_found
+      refute_includes response.body, "SECRET_AUTH_TOKEN"
     end
 
     test "custom authentication receives request object" do
@@ -303,12 +313,12 @@ module Beskar
       controller = ApplicationController.new
 
       assert_equal "success", controller.send(:risk_level_class, 10)
-      assert_equal "success", controller.send(:risk_level_class, 30)
+      assert_equal "warning", controller.send(:risk_level_class, 30)
       assert_equal "warning", controller.send(:risk_level_class, 31)
       assert_equal "warning", controller.send(:risk_level_class, 60)
-      assert_equal "danger", controller.send(:risk_level_class, 61)
+      assert_equal "warning", controller.send(:risk_level_class, 61)
       assert_equal "danger", controller.send(:risk_level_class, 85)
-      assert_equal "critical", controller.send(:risk_level_class, 86)
+      assert_equal "danger", controller.send(:risk_level_class, 86)
       assert_equal "critical", controller.send(:risk_level_class, 100)
     end
 
@@ -444,14 +454,14 @@ module Beskar
       # Test exact boundaries
       assert_equal "success", controller.send(:risk_level_class, 0)
       assert_equal "warning", controller.send(:risk_level_class, 31)
-      assert_equal "danger", controller.send(:risk_level_class, 61)
-      assert_equal "critical", controller.send(:risk_level_class, 86)
+      assert_equal "danger", controller.send(:risk_level_class, 70)
+      assert_equal "critical", controller.send(:risk_level_class, 90)
 
-      # Test negative values (fall into else clause, treated as critical/unusual)
-      assert_equal "critical", controller.send(:risk_level_class, -10)
+      # Invalid scores are unknown, not evidence of a critical threat.
+      assert_equal "neutral", controller.send(:risk_level_class, -10)
 
       # Test very high values
-      assert_equal "critical", controller.send(:risk_level_class, 1000)
+      assert_equal "neutral", controller.send(:risk_level_class, 1000)
     end
 
     test "authentication handles configuration reset during request" do
@@ -501,7 +511,7 @@ module Beskar
         raise custom_error, "Custom authentication error"
       end
 
-      Rails.logger.expects(:error).with(regexp_matches(/Custom authentication error/))
+      Rails.logger.expects(:error).with("Beskar authentication error: #{custom_error}")
 
       get "/beskar/dashboard"
 

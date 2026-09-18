@@ -12,7 +12,7 @@ class BeskarTest < ActiveSupport::TestCase
     assert config.security_tracking[:enabled]
     assert config.security_tracking[:track_successful_logins]
     assert config.security_tracking[:track_failed_logins]
-    assert config.security_tracking[:auto_analyze_patterns]
+    assert_not config.security_tracking[:auto_analyze_patterns]
     assert_not_nil config.rate_limiting
   end
 
@@ -45,14 +45,14 @@ class BeskarTest < ActiveSupport::TestCase
       config.monitor_only = false
       config.waf[:enabled] = true
       config.waf[:auto_block] = true
-      config.waf[:block_threshold] = 2
+      config.waf[:score_threshold] = 200
     end
 
     config = Beskar.configuration
     assert config.waf_enabled?
     assert config.waf_auto_block?
     assert_not config.monitor_only?
-    assert_equal 2, config.waf[:block_threshold]
+    assert_equal 200, config.waf[:score_threshold]
 
     # Restore original config
     Beskar.configuration.waf = original_waf

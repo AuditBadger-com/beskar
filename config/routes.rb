@@ -16,6 +16,7 @@ Beskar::Engine.routes.draw do
   resources :banned_ips do
     member do
       post "extend"
+      get "review"
     end
 
     collection do
@@ -24,20 +25,8 @@ Beskar::Engine.routes.draw do
     end
   end
 
-  # API endpoints (optional, for future AJAX calls)
-  namespace :api do
-    namespace :v1 do
-      resources :security_events, only: [:index, :show] do
-        collection do
-          get "stats"
-        end
-      end
+  resources :administrative_actions, only: [:index, :show]
 
-      resources :banned_ips, only: [:index, :show, :create, :destroy] do
-        member do
-          post "extend"
-        end
-      end
-    end
-  end
+  # No versioned JSON API is implemented. Authenticated CSV/JSON exports live
+  # on the resources above; do not expose routes to nonexistent controllers.
 end

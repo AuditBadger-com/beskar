@@ -3,12 +3,8 @@
 <% content_for :header_actions do %>
   <%= link_to "← Back to Banned IPs", banned_ips_path, class: "btn btn-secondary" %>
   <%= link_to "Edit", edit_banned_ip_path(@banned_ip), class: "btn btn-secondary" %>
-  <%= link_to "Unban", banned_ip_path(@banned_ip),
-      data: {
-        "turbo-method": "delete",
-        "turbo-confirm": "Are you sure you want to unban #{@banned_ip.ip_address}?"
-      },
-      class: "btn btn-danger" %>
+  <%= link_to "Action History", administrative_actions_path(target_id: @banned_ip.id), class: "btn btn-secondary" %>
+  <%= link_to "Unban", review_banned_ip_path(@banned_ip, operation: "unban"), class: "btn btn-danger" %>
 <% end %>
 
 <!-- Ban Overview -->
@@ -143,7 +139,7 @@
       </div>
 
       <div style="text-align: center; padding: 1rem; background: #FAFBFC; border-radius: 6px;">
-        <div style="font-size: 24px; font-weight: 600; color: <%= @stats[:avg_risk_score] > 70 ? '#E91E63' : '#1A1F36' %>;">
+        <div style="font-size: 24px; font-weight: 600; color: <%= risk_level_color(@stats[:avg_risk_score]) %>;">
           <%= @stats[:avg_risk_score] %>
         </div>
         <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.025em; color: #697386; margin-top: 0.25rem;">
@@ -152,7 +148,7 @@
       </div>
 
       <div style="text-align: center; padding: 1rem; background: #FAFBFC; border-radius: 6px;">
-        <div style="font-size: 24px; font-weight: 600; color: <%= @stats[:max_risk_score] > 85 ? '#D32F2F' : '#1A1F36' %>;">
+        <div style="font-size: 24px; font-weight: 600; color: <%= risk_level_color(@stats[:max_risk_score]) %>;">
           <%= @stats[:max_risk_score] %>
         </div>
         <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.025em; color: #697386; margin-top: 0.25rem;">
@@ -239,11 +235,11 @@
                 <td>
                   <% if event.user %>
                     <div style="font-size: 13px;">
-                      <%= event.user.try(:email) || "User ##{event.user_id}" %>
+                      <%= audit_user_label(event) %>
                     </div>
                   <% elsif event.attempted_email %>
                     <div style="font-size: 13px; color: #697386;">
-                      <%= event.attempted_email %>
+                      <%= audit_user_label(event) %>
                     </div>
                   <% else %>
                     <span style="color: #C1C7D0;">-</span>
@@ -295,16 +291,14 @@
               ['Make Permanent', 'permanent']
             ]),
             style: "padding: 0.5rem 0.75rem; font-size: 14px;" %>
+        <%= label_tag :audit_reason, "Administrative reason" %>
+        <%= text_field_tag :audit_reason, nil, required: true, maxlength: 1000 %>
         <%= submit_tag "Extend Ban", class: "btn btn-warning" %>
       <% end %>
     </div>
   <% end %>
 
-  <%= link_to "Unban IP", banned_ip_path(@banned_ip),
-      data: {
-        "turbo-method": "delete",
-        "turbo-confirm": "Are you sure you want to unban #{@banned_ip.ip_address}?"
-      },
+  <%= link_to "Unban IP", review_banned_ip_path(@banned_ip, operation: "unban"),
       class: "btn btn-danger",
       style: "margin-left: #{ @banned_ip.active? && !@banned_ip.permanent? ? '0' : 'auto' };" %>
 </div>

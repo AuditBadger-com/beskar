@@ -37,7 +37,7 @@ class Beskar::SecurityTrackableTest < BeskarTestBase
 
     assert_security_event_created(event)
     assert_not_nil event.metadata["timestamp"]
-    assert_not_nil event.metadata["session_id"]
+    refute event.metadata.key?("session_id")
     assert_equal "/test", event.metadata["request_path"]
     assert_not_nil event.metadata["device_info"]
   end
@@ -227,37 +227,14 @@ class Beskar::SecurityTrackableTest < BeskarTestBase
   end
 
   test "should respect auto_analyze_patterns configuration" do
-    skip "SecurityAnalysisJob not defined" unless defined?(Beskar::SecurityAnalysisJob)
-
-    original_config = Beskar.configuration.security_tracking
-
-    # Disable auto analysis
+    BeskarAnalysisTestJob.expects(:perform_later).never
+    assert_nil @user.analyze_suspicious_patterns_async
     Beskar.configure do |config|
-      config.security_tracking = original_config.merge(auto_analyze_patterns: false)
+      config.security_tracking.merge!(auto_analyze_patterns: true, analysis_job: "BeskarAnalysisTestJob")
     end
-
-    # Mock the job to verify it's not called
-    job_called = false
-    Beskar::SecurityAnalysisJob.stub_const(:perform_later, ->(*args) { job_called = true }) do
-      @user.analyze_suspicious_patterns_async
-    end
-
-    assert_not job_called, "Should not queue analysis job when auto_analyze_patterns is disabled"
-
-    # Re-enable and test
-    Beskar.configure do |config|
-      config.security_tracking = original_config.merge(auto_analyze_patterns: true)
-    end
-
-    job_called = false
-    Beskar::SecurityAnalysisJob.stub_const(:perform_later, ->(*args) { job_called = true }) do
-      @user.analyze_suspicious_patterns_async
-    end
-
-    assert job_called, "Should queue analysis job when auto_analyze_patterns is enabled"
-
-    # Restore original config
-    Beskar.configuration.security_tracking = original_config
+    @user.expects(:analyze_suspicious_patterns_async).once
+    event = @user.track_authentication_event(@request, :success)
+    assert_equal "login_success", event.event_type
   end
 
   test "should respect security_tracking enabled configuration" do
@@ -287,7 +264,7 @@ class Beskar::SecurityTrackableTest < BeskarTestBase
     assert Beskar.configuration.security_tracking_enabled?
     assert Beskar.configuration.track_successful_logins?
     assert Beskar.configuration.track_failed_logins?
-    assert Beskar.configuration.auto_analyze_patterns?
+    assert_not Beskar.configuration.auto_analyze_patterns?
 
     # Test disabled
     Beskar.configure do |config|

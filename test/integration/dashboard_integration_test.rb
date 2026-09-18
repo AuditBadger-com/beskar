@@ -7,11 +7,12 @@ module Beskar
 
     setup do
       # Clear any existing data
-      Beskar::SecurityEvent.destroy_all
+      Beskar::SecurityEvent.delete_all
       Beskar::BannedIp.destroy_all
 
       # Configure authentication to allow access for tests
       Beskar.configuration.authenticate_admin = ->(_request) { true }
+      Beskar.configuration.audit_actor = ->(_) { "test:administrator" }
 
       # Create test users
       @admin_user = create(:user, email_address: "admin@example.com")
@@ -23,7 +24,7 @@ module Beskar
 
     teardown do
       # Reset configuration
-      Beskar.configuration = Beskar::Configuration.new
+      Beskar.instance_variable_set(:@configuration, TestHelper.configuration)
     end
 
     # End-to-end authentication flow
@@ -101,14 +102,13 @@ module Beskar
 
       # Ban via the form
       assert_difference "Beskar::BannedIp.count", 1 do
-        post "/beskar/banned_ips", params: {
-          banned_ip: {
-            ip_address: attacker_ip,
-            reason: "Multiple failed login attempts"
-          },
-          ban_type: "temporary",
-          duration: "86400" # 24 hours in seconds
-        }
+        post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                            banned_ip: {
+                                              ip_address: attacker_ip,
+                                              reason: "Multiple failed login attempts"
+                                            },
+                                            ban_type: "temporary",
+                                            duration: "86400"} # 24 hours in seconds
       end
 
       ban = Beskar::BannedIp.find_by(ip_address: attacker_ip)
@@ -161,7 +161,7 @@ module Beskar
       assert_match suspicious_ip, response.body
 
       # Export filtered results as CSV
-      get "/beskar/security_events/export.csv", params: {
+      get "/beskar/security_events/export.csv", headers: {"X-Beskar-Audit-Reason" => "Export regression"}, params: {
         ip_address: suspicious_ip
       }
       assert_response :success
@@ -186,23 +186,23 @@ module Beskar
       assert_response :success
       assert_match(/192.168.50.1/, response.body)
 
-      # Simulate repeat violation - extend the ban
-      post "/beskar/banned_ips/#{ban.id}/extend", params: {duration: "24h"}
+      # An administrative extension changes time, not the violation count.
+      post "/beskar/banned_ips/#{ban.id}/extend", params: {audit_reason: "Reviewed test case", duration: "24h"}
       assert_redirected_to "/beskar/banned_ips/#{ban.id}"
 
       ban.reload
-      assert_equal 2, ban.violation_count
+      assert_equal 1, ban.violation_count
       assert ban.expires_at > 1.hour.from_now
 
       # After multiple violations, make it permanent
-      3.times { ban.extend_ban! }
+      4.times { ban.extend_ban! }
 
       get "/beskar/banned_ips/#{ban.reload.id}"
       assert_response :success
       assert_match(/Permanent/i, response.body)
 
       # Later, decide to unban
-      delete "/beskar/banned_ips/#{ban.id}"
+      delete "/beskar/banned_ips/#{ban.id}", params: {audit_reason: "Reviewed test case"}
       assert_redirected_to "/beskar/banned_ips"
 
       # Verify IP is no longer banned
@@ -247,7 +247,7 @@ module Beskar
     # Test filtering and search across dashboard
     test "search and filter workflow across dashboard sections" do
       # Clear any existing events
-      Beskar::SecurityEvent.destroy_all
+      Beskar::SecurityEvent.delete_all
 
       # Create events with searchable patterns
       create(:security_event,
@@ -264,7 +264,7 @@ module Beskar
       assert_match(/sqlmap/, response.body)
 
       # Use time range filter
-      Beskar::SecurityEvent.destroy_all
+      Beskar::SecurityEvent.delete_all
       create(:security_event, created_at: 25.hours.ago)
       create(:security_event, created_at: 1.hour.ago)
 
@@ -287,23 +287,21 @@ module Beskar
 
       # Test bulk unban action
       assert_difference "Beskar::BannedIp.count", -2 do
-        post "/beskar/banned_ips/bulk_action", params: {
-          bulk_action: "unban",
-          ip_ids: [active_bans[0].id, active_bans[1].id]
-        }
+        post "/beskar/banned_ips/bulk_action", params: {audit_reason: "Reviewed test case",
+                                                        bulk_action: "unban",
+                                                        ip_ids: [active_bans[0].id, active_bans[1].id]}
       end
       assert_redirected_to "/beskar/banned_ips"
 
       # Test bulk extend action
-      post "/beskar/banned_ips/bulk_action", params: {
-        bulk_action: "extend",
-        duration: "24h",
-        ip_ids: [active_bans[2].id]
-      }
+      post "/beskar/banned_ips/bulk_action", params: {audit_reason: "Reviewed test case",
+                                                      bulk_action: "extend",
+                                                      duration: "24h",
+                                                      ip_ids: [active_bans[2].id]}
       assert_redirected_to "/beskar/banned_ips"
 
       active_bans[2].reload
-      assert_equal 2, active_bans[2].violation_count
+      assert_equal 1, active_bans[2].violation_count
     end
 
     # Test real-time threat response workflow
@@ -345,13 +343,12 @@ module Beskar
       end
 
       # Take immediate action - ban the IP
-      post "/beskar/banned_ips", params: {
-        banned_ip: {
-          ip_address: attacker_ip,
-          reason: "WAF violations after failed logins"
-        },
-        ban_type: "permanent"
-      }
+      post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                          banned_ip: {
+                                            ip_address: attacker_ip,
+                                            reason: "WAF violations after failed logins"
+                                          },
+                                          ban_type: "permanent"}
 
       # Verify IP is now banned
       assert Beskar::BannedIp.banned?(attacker_ip)
@@ -386,6 +383,7 @@ module Beskar
       # Can perform actions as admin
       post "/beskar/banned_ips",
         params: {
+          audit_reason: "Reviewed test case",
           banned_ip: {
             ip_address: "10.0.0.1",
             reason: "Admin ban"
@@ -401,20 +399,19 @@ module Beskar
     # Test error handling throughout workflow
     test "graceful error handling in dashboard workflow" do
       # Try to ban without required reason
-      post "/beskar/banned_ips", params: {
-        banned_ip: {
-          ip_address: "10.0.0.1"
-        }
-      }
+      post "/beskar/banned_ips", params: {audit_reason: "Reviewed test case",
+                                          banned_ip: {
+                                            ip_address: "10.0.0.1"
+                                          }}
       # Should render form again due to validation error
-      assert_response :success # renders :new template
+      assert_response :unprocessable_content # renders :new template
 
       # Try to access non-existent event
       get "/beskar/security_events/999999"
       assert_response :not_found
 
       # Dashboard should still work with no data
-      Beskar::SecurityEvent.destroy_all
+      Beskar::SecurityEvent.delete_all
       Beskar::BannedIp.destroy_all
 
       get "/beskar/dashboard"
@@ -426,7 +423,7 @@ module Beskar
     # Test dashboard data consistency
     test "dashboard data remains consistent across sections" do
       # Create known dataset
-      Beskar::SecurityEvent.destroy_all
+      Beskar::SecurityEvent.delete_all
       Beskar::BannedIp.destroy_all
 
       create_list(:security_event, 10, created_at: 1.hour.ago)

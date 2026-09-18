@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 namespace :beskar do
+  desc "Remove expired coordination state (does not remove audit events or active bans)"
+  task cleanup_security_state: :environment do
+    Beskar::SecurityState.cleanup_expired!
+  end
+
   desc "Install Beskar: copy migrations and create initializer"
   task install: :environment do
     puts "=" * 80
@@ -10,13 +15,7 @@ namespace :beskar do
 
     # Copy migrations
     puts "📦 Copying migrations..."
-    begin
-      Rake::Task["beskar:install:migrations"].invoke
-    rescue RuntimeError
-      # In development/test within the gem, this task might not exist
-      # In a real app using the gem, it will work fine
-      puts "   (Skipping migration copy in gem development mode)"
-    end
+    Rake::Task["beskar:install:migrations"].invoke
     puts "✓ Migrations ready"
     puts
 
@@ -26,7 +25,7 @@ namespace :beskar do
     if File.exist?(initializer_path)
       puts "⚠️  Initializer already exists at config/initializers/beskar.rb"
       print "   Overwrite? (y/N): "
-      response = $stdin.gets.chomp.downcase
+      response = $stdin.gets.to_s.strip.downcase
 
       unless response == "y" || response == "yes"
         puts "   Skipping initializer creation"
@@ -69,7 +68,7 @@ namespace :beskar do
     puts
     puts "   # app/models/user.rb"
     puts "   class User < ApplicationRecord"
-    puts "     include Beskar::SecurityTrackable"
+    puts "     include Beskar::Models::SecurityTrackable"
     puts "     "
     puts "     devise :database_authenticatable, :registerable,"
     puts "            :recoverable, :rememberable, :validatable"
@@ -98,11 +97,8 @@ namespace :beskar do
     puts "5. When ready to enable blocking:"
     puts
     puts "   # config/initializers/beskar.rb"
-    puts "   config.waf = {"
-    puts "     enabled: true,"
-    puts "     monitor_only: false,  # <-- Change this to false"
-    puts "     # ... rest of config"
-    puts "   }"
+    puts "   config.waf[:enabled] = true"
+    puts "   config.monitor_only = false"
     puts
     puts "6. Optional: Add IP whitelist for trusted sources:"
     puts
@@ -115,7 +111,7 @@ namespace :beskar do
     puts "=" * 80
     puts "Documentation:"
     puts "  - README: https://github.com/humadroid-io/beskar"
-    puts "  - WAF Monitor Mode: See MONITOR_ONLY_MODE.md"
+    puts "  - WAF Monitor Mode: See docs/operations/monitor-only-mode.md"
     puts "=" * 80
   end
 end

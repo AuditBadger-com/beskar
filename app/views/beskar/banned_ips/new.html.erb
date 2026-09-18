@@ -10,7 +10,7 @@
     <div class="card-subtitle">Add a new IP address to the ban list</div>
   </div>
   <div class="card-body">
-    <%= form_with model: @banned_ip, url: banned_ips_path, local: true do |f| %>
+    <%= form_with model: @banned_ip, url: banned_ips_path, local: true, data: { beskar_ban_form: true } do |f| %>
       <% if @banned_ip.errors.any? %>
         <div class="alert alert-danger">
           <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 0.5rem;">
@@ -42,15 +42,7 @@
         <div class="form-group">
           <%= f.label :reason, "Ban Reason *" %>
           <%= f.select :reason,
-              options_for_select([
-                ['Rate Limit Abuse', 'rate_limit_abuse'],
-                ['Authentication Abuse', 'authentication_abuse'],
-                ['WAF Violation', 'waf_violation'],
-                ['Brute Force Attack', 'brute_force_attack'],
-                ['Suspicious Activity', 'suspicious_activity'],
-                ['Manual Ban', 'manual_ban'],
-                ['Other', 'other']
-              ], @suggested_reason || @banned_ip.reason),
+              options_for_select(ban_reason_options, @suggested_reason || @banned_ip.reason),
               { prompt: 'Select a reason...' },
               { required: true } %>
           <div style="font-size: 12px; color: #697386; margin-top: 0.25rem;">
@@ -63,20 +55,18 @@
           <label>Ban Duration *</label>
           <div style="display: flex; flex-direction: column; gap: 0.5rem;">
             <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-              <%= radio_button_tag :ban_type, 'temporary', !@banned_ip.permanent?,
-                  onchange: "toggleDurationFields()" %>
+              <%= radio_button_tag :ban_type, 'temporary', !@banned_ip.permanent? %>
               <span style="font-weight: normal;">Temporary Ban</span>
             </label>
             <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-              <%= radio_button_tag :ban_type, 'permanent', @banned_ip.permanent?,
-                  onchange: "toggleDurationFields()" %>
+              <%= radio_button_tag :ban_type, 'permanent', @banned_ip.permanent? %>
               <span style="font-weight: normal; color: #D32F2F;">Permanent Ban</span>
             </label>
           </div>
         </div>
 
         <!-- Temporary Ban Options -->
-        <div id="temporary-options" style="<%= @banned_ip.permanent? ? 'display: none;' : '' %>">
+        <div id="temporary-options">
           <div class="form-group">
             <label>Duration</label>
             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem;">
@@ -89,21 +79,21 @@
                 ['90 Days', 90.days]
               ].each do |label, duration| %>
                 <label style="display: flex; align-items: center; padding: 0.75rem; background: #FAFBFC; border: 1px solid #E3E8EE; border-radius: 6px; cursor: pointer;">
-                  <%= radio_button_tag :duration, duration.to_i, false %>
+                  <%= radio_button_tag :duration, duration.to_i, params[:duration].to_s == duration.to_i.to_s %>
                   <span style="margin-left: 0.5rem; font-size: 13px; font-weight: normal;"><%= label %></span>
                 </label>
               <% end %>
             </div>
             <div style="font-size: 12px; color: #697386; margin-top: 0.5rem;">
-              Or specify a custom expiry date and time:
+              Or specify a custom expiry in UTC. Without either, the server applies 24 hours:
             </div>
           </div>
 
           <div class="form-group">
-            <%= f.label :expires_at, "Custom Expiry Date/Time" %>
+            <%= f.label :expires_at, "Custom Expiry Date/Time (UTC)" %>
             <%= f.datetime_field :expires_at,
-                value: @banned_ip.expires_at&.strftime('%Y-%m-%dT%H:%M'),
-                min: DateTime.now.strftime('%Y-%m-%dT%H:%M') %>
+                value: (params.dig(:banned_ip, :expires_at).present? ? ban_expiry_input_value(@banned_ip.expires_at) : ""),
+                step: "0.001" %>
           </div>
         </div>
 
@@ -123,7 +113,7 @@
           <%= f.label :violation_count, "Initial Violation Count" %>
           <%= f.number_field :violation_count,
               value: @banned_ip.violation_count || 1,
-              min: 0 %>
+              min: 1 %>
           <div style="font-size: 12px; color: #697386; margin-top: 0.25rem;">
             Set the initial violation count. This affects ban escalation for repeat offenders.
           </div>
@@ -139,6 +129,12 @@
           </div>
         <% end %>
 
+        <div class="form-group">
+          <%= label_tag :audit_reason, "Administrative reason *" %>
+          <%= text_area_tag :audit_reason, params[:audit_reason], required: true, maxlength: 1000, rows: 2 %>
+          <p>Use a case reference or brief explanation, without credentials or other secrets.</p>
+        </div>
+
         <!-- Submit Buttons -->
         <div style="display: flex; gap: 0.5rem;">
           <%= f.submit "Ban IP Address", class: "btn btn-danger" %>
@@ -150,7 +146,7 @@
 </div>
 
 <!-- Preview Card -->
-<div class="card" id="ban-preview" style="display: none;">
+<div class="card" id="ban-preview" hidden>
   <div class="card-header">
     <h3 class="card-title">Ban Preview</h3>
     <div class="card-subtitle">This is how the ban will appear</div>
@@ -192,119 +188,3 @@
     </div>
   </div>
 </div>
-
-<script>
-  function toggleDurationFields() {
-    const isPermanent = document.querySelector('input[name="ban_type"]:checked').value === 'permanent';
-    const temporaryOptions = document.getElementById('temporary-options');
-
-    if (isPermanent) {
-      temporaryOptions.style.display = 'none';
-      // Clear duration selections
-      document.querySelectorAll('input[name="duration"]').forEach(input => {
-        input.checked = false;
-      });
-      document.getElementById('banned_ip_expires_at').value = '';
-    } else {
-      temporaryOptions.style.display = 'block';
-    }
-
-    updatePreview();
-  }
-
-  function updatePreview() {
-    const previewCard = document.getElementById('ban-preview');
-    const ipInput = document.getElementById('banned_ip_ip_address');
-    const reasonSelect = document.getElementById('banned_ip_reason');
-
-    if (ipInput.value || reasonSelect.value) {
-      previewCard.style.display = 'block';
-
-      // Update IP
-      document.getElementById('preview-ip').textContent = ipInput.value || '-';
-
-      // Update reason
-      const reasonText = reasonSelect.options[reasonSelect.selectedIndex]?.text || '-';
-      document.getElementById('preview-reason').textContent = reasonText;
-
-      // Update duration
-      const isPermanent = document.querySelector('input[name="ban_type"]:checked')?.value === 'permanent';
-      if (isPermanent) {
-        document.getElementById('preview-duration').textContent = 'Permanent';
-        document.getElementById('preview-duration').style.color = '#D32F2F';
-        document.getElementById('preview-status').className = 'badge badge-critical';
-        document.getElementById('preview-status').textContent = 'Permanent';
-      } else {
-        const durationRadio = document.querySelector('input[name="duration"]:checked');
-        const customExpiry = document.getElementById('banned_ip_expires_at').value;
-
-        if (customExpiry) {
-          const expiryDate = new Date(customExpiry);
-          document.getElementById('preview-duration').textContent = expiryDate.toLocaleString();
-        } else if (durationRadio) {
-          const label = durationRadio.parentElement.textContent.trim();
-          document.getElementById('preview-duration').textContent = label;
-        } else {
-          document.getElementById('preview-duration').textContent = 'Not specified';
-        }
-        document.getElementById('preview-duration').style.color = '#1A1F36';
-        document.getElementById('preview-status').className = 'badge badge-danger';
-        document.getElementById('preview-status').textContent = 'Active';
-      }
-    } else {
-      previewCard.style.display = 'none';
-    }
-  }
-
-  // Set up event listeners
-  document.addEventListener('DOMContentLoaded', function() {
-    // Update preview on input changes
-    document.getElementById('banned_ip_ip_address').addEventListener('input', updatePreview);
-    document.getElementById('banned_ip_reason').addEventListener('change', updatePreview);
-    document.getElementById('banned_ip_expires_at').addEventListener('change', updatePreview);
-
-    document.querySelectorAll('input[name="duration"]').forEach(input => {
-      input.addEventListener('change', function() {
-        // Clear custom expiry when selecting a preset duration
-        document.getElementById('banned_ip_expires_at').value = '';
-        updatePreview();
-      });
-    });
-
-    // Clear preset duration when entering custom expiry
-    document.getElementById('banned_ip_expires_at').addEventListener('input', function() {
-      if (this.value) {
-        document.querySelectorAll('input[name="duration"]').forEach(input => {
-          input.checked = false;
-        });
-      }
-    });
-
-    // Initial preview update
-    updatePreview();
-
-    // Handle form submission
-    document.querySelector('form').addEventListener('submit', function(e) {
-      const isPermanent = document.querySelector('input[name="ban_type"]:checked').value === 'permanent';
-
-      if (isPermanent) {
-        // Set permanent flag
-        const permanentField = document.createElement('input');
-        permanentField.type = 'hidden';
-        permanentField.name = 'banned_ip[permanent]';
-        permanentField.value = 'true';
-        this.appendChild(permanentField);
-      } else {
-        // Calculate expires_at based on duration if not custom
-        const durationRadio = document.querySelector('input[name="duration"]:checked');
-        const customExpiry = document.getElementById('banned_ip_expires_at').value;
-
-        if (!customExpiry && durationRadio) {
-          const durationSeconds = parseInt(durationRadio.value);
-          const expiresAt = new Date(Date.now() + durationSeconds * 1000);
-          document.getElementById('banned_ip_expires_at').value = expiresAt.toISOString().slice(0, 16);
-        }
-      }
-    });
-  });
-</script>

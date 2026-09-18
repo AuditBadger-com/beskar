@@ -1,0 +1,33 @@
+<% content_for :page_title, "Administrative Action History" %>
+<div class="card">
+  <div class="card-header">
+    <h3 class="card-title">Administrative actions</h3>
+    <p><%= @pagination[:total_count] %> actions<%= " for ban ##{params[:target_id]}" if params[:target_id].present? %>. History survives removal of the live ban.</p>
+  </div>
+  <div class="card-body">
+    <table>
+      <thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Actor</th><th>Reason</th><th>Details</th></tr></thead>
+      <tbody>
+        <% @administrative_actions.each do |entry| %>
+          <tr>
+            <td><%= format_timestamp(entry.created_at) %></td>
+            <td><%= entry.action.humanize %></td>
+            <td><%= entry.target_type %><%= " ##{entry.target_id}" if entry.target_id %></td>
+            <td><%= entry.actor %></td>
+            <td><%= entry.reason %></td>
+            <td><%= link_to "View action", administrative_action_path(entry) %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+    <% if @administrative_actions.empty? %><p>No administrative actions recorded.</p><% end %>
+    <nav aria-label="Action history pages">
+      <% if @pagination[:has_previous] %>
+        <%= link_to "Previous", administrative_actions_path(target_id: params[:target_id], page: @pagination[:previous_page], per_page: @pagination[:per_page]) %>
+      <% end %>
+      <% if @pagination[:has_next] %>
+        <%= link_to "Next", administrative_actions_path(target_id: params[:target_id], page: @pagination[:next_page], per_page: @pagination[:per_page]) %>
+      <% end %>
+    </nav>
+  </div>
+</div>
