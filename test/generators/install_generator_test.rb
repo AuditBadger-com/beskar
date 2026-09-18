@@ -4,7 +4,7 @@ require "fileutils"
 require "open3"
 
 class InstallGeneratorTest < Rails::Generators::TestCase
-  # Disable parallelization for generator tests due to filesystem operations
+  # Prefer serial generation; PARALLEL_WORKERS can override this in CI.
   parallelize(workers: 1)
 
   tests Beskar::Generators::InstallGenerator
@@ -12,6 +12,8 @@ class InstallGeneratorTest < Rails::Generators::TestCase
 
   def setup
     super
+    # Parallel workers must not remove one another's generated files.
+    self.destination_root = File.join(self.class.destination_root, Process.pid.to_s)
     prepare_destination
   end
 
@@ -203,7 +205,7 @@ class InstallGeneratorTest < Rails::Generators::TestCase
       abort "missing operation index" unless connection.indexes(:beskar_administrative_actions).any? { |index| index.unique && index.columns == ["operation_id", "target_id"] }
       abort "missing lock version" unless connection.columns(:beskar_security_states).any? { |column| column.name == "lock_version" }
     RUBY
-    output, error, status = Open3.capture3(RbConfig.ruby, "-rbundler/setup", "-ractive_record", "-e", code,
+    output, error, status = Open3.capture3(RbConfig.ruby, "-rbundler/setup", "-rfileutils", "-ractive_record", "-e", code,
       File.join(destination_root, "fresh.sqlite3"), File.join(destination_root, "db/migrate"))
     assert status.success?, "Fresh migration failed: #{output}\n#{error}"
   end

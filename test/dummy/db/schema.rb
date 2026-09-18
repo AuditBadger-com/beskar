@@ -10,17 +10,18 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_09_11_000001) do
+ActiveRecord::Schema[8.0].define(version: 2026_09_11_000002) do
   create_table "beskar_administrative_actions", force: :cascade do |t|
     t.string "actor", limit: 200, null: false
     t.string "action", null: false
-    t.bigint "target_id", null: false
+    t.bigint "target_id"
     t.string "operation_id", limit: 36, null: false
     t.string "request_id", limit: 200, null: false
     t.text "reason", null: false
     t.json "before_state", default: {}, null: false
     t.json "after_state", default: {}, null: false
     t.datetime "created_at", null: false
+    t.string "target_type", default: "BannedIp", null: false
     t.index ["created_at"], name: "index_beskar_administrative_actions_on_created_at"
     t.index ["operation_id", "target_id"], name: "index_beskar_actions_on_operation_target", unique: true
     t.index ["target_id", "id"], name: "index_beskar_administrative_actions_on_target_id_and_id"
