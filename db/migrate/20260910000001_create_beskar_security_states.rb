@@ -2,7 +2,7 @@ class CreateBeskarSecurityStates < ActiveRecord::Migration[8.0]
   def change
     create_table :beskar_security_states do |t|
       t.string :key, null: false
-      t.json :data, null: false, default: {}
+      t.json :data, null: false, default: -> { "('{}')" }
       t.datetime :expires_at
       t.integer :lock_version, null: false, default: 0
       t.timestamps

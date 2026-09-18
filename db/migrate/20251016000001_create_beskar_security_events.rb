@@ -8,7 +8,7 @@ class CreateBeskarSecurityEvents < ActiveRecord::Migration[8.0]
       t.string :ip_address
       t.string :attempted_email
       t.text :user_agent
-      t.json :metadata, default: {}
+      t.json :metadata, default: -> { "('{}')" }
       t.integer :risk_score
 
       t.timestamps

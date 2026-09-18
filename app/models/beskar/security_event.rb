@@ -1,5 +1,8 @@
 module Beskar
   class SecurityEvent < ApplicationRecord
+    # MySQL reports expression defaults as functions, not Ruby attribute values.
+    attribute :metadata, default: -> { {} }
+
     # Transient correlation; the audit row is not enforcement authority.
     attr_accessor :beskar_attempt
     belongs_to :user, polymorphic: true, optional: true

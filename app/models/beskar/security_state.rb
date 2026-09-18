@@ -3,6 +3,9 @@ module Beskar
   class SecurityState < ApplicationRecord
     class ConcurrentCleanup < StandardError; end
 
+    # Preserve defaults on unsaved records as well as database-created rows.
+    attribute :data, default: -> { {} }
+
     validates :key, presence: true
 
     def self.read(key)

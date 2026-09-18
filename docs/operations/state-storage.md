@@ -34,13 +34,22 @@ Session resumption/generation checks add uncached database reads; locks revoke
 generations transactionally. Benchmark with the host application's traffic and pool
 size. No fixed throughput or latency guarantee is asserted.
 
-Concurrency regressions currently exercise separate connections to SQLite. The
-implementation uses Active Record transactions and portable queries, but equivalent
-PostgreSQL/MySQL concurrency and production-load runs remain to be performed.
-CI jobs now run the full suite against PostgreSQL 17 and MySQL 8.4, but those jobs
-have not been executed here. Local Docker access was denied, including outside
-the sandbox. `BESKAR_TEST_DATABASE_URL` selects an isolated test database; never
+Concurrency regressions exercise separate database connections. The PostgreSQL 17
+full-suite job passed in [CI run 35342475137](https://github.com/AuditBadger-com/beskar/actions/runs/35342475137).
+The MySQL 8.4 job failed during schema loading; the JSON-default and foreign-key
+fixes still need hosted confirmation. Production-load validation remains open.
+Local Docker access was denied, including outside the sandbox.
+`BESKAR_TEST_DATABASE_URL` selects an isolated test database; never
 point it at a production database (Rails test tasks can rebuild it).
+
+JSON columns use `default: -> { "('{}')" }`: MySQL requires a parenthesized
+expression for [JSON defaults](https://dev.mysql.com/doc/refman/8.4/en/data-type-defaults.html).
+SQLite and PostgreSQL accept this expression too. Model attributes also supply
+independent empty hashes because MySQL reports these defaults as SQL functions.
+When regenerating the dummy schema from SQLite, preserve these expressions and
+the `sessions.user_id` bigint type needed to match MySQL's default primary keys.
+Regression tests check both migrations and the checked-in schema's MySQL SQL,
+plus actual default values on the active test database.
 
 ## Rate-limit semantics
 
@@ -104,7 +113,7 @@ expired-counter cleanup does not delete native lock authority.
 
 ## Verification
 
-Run with the project's mise default Ruby (4.0.6 locally):
+Run with the project's current mise default Ruby:
 
 ```sh
 mise exec -- env PARALLEL_WORKERS=1 bin/rails test

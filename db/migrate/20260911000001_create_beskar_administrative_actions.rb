@@ -7,8 +7,9 @@ class CreateBeskarAdministrativeActions < ActiveRecord::Migration[8.0]
       t.string :operation_id, null: false, limit: 36
       t.string :request_id, null: false, limit: 200
       t.text :reason, null: false
-      t.json :before_state, null: false, default: {}
-      t.json :after_state, null: false, default: {}
+      # MySQL requires JSON defaults to be expressions, even for literals.
+      t.json :before_state, null: false, default: -> { "('{}')" }
+      t.json :after_state, null: false, default: -> { "('{}')" }
       t.datetime :created_at, null: false
     end
     # No user/ban foreign key or cascading association: the action must survive

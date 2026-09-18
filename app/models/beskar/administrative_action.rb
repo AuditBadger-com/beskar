@@ -1,5 +1,8 @@
 module Beskar
   class AdministrativeAction < ApplicationRecord
+    attribute :before_state, default: -> { {} }
+    attribute :after_state, default: -> { {} }
+
     ACTIONS = %w[ban_created ban_updated ban_unbanned ban_extended ban_made_permanent audit_exported configuration_changed].freeze
     before_validation :sanitize_audit_fields
     after_find :sanitize_audit_fields

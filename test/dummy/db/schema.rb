@@ -18,8 +18,8 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_11_000002) do
     t.string "operation_id", limit: 36, null: false
     t.string "request_id", limit: 200, null: false
     t.text "reason", null: false
-    t.json "before_state", default: {}, null: false
-    t.json "after_state", default: {}, null: false
+    t.json "before_state", default: -> { "('{}')" }, null: false
+    t.json "after_state", default: -> { "('{}')" }, null: false
     t.datetime "created_at", null: false
     t.string "target_type", default: "BannedIp", null: false
     t.index ["created_at"], name: "index_beskar_administrative_actions_on_created_at"
@@ -51,7 +51,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_11_000002) do
     t.string "ip_address"
     t.string "attempted_email"
     t.text "user_agent"
-    t.json "metadata", default: {}
+    t.json "metadata", default: -> { "('{}')" }
     t.integer "risk_score"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
@@ -67,7 +67,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_11_000002) do
 
   create_table "beskar_security_states", force: :cascade do |t|
     t.string "key", null: false
-    t.json "data", default: {}, null: false
+    t.json "data", default: -> { "('{}')" }, null: false
     t.datetime "expires_at"
     t.integer "lock_version", default: 0, null: false
     t.datetime "created_at", null: false
@@ -101,7 +101,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_11_000002) do
   end
 
   create_table "sessions", force: :cascade do |t|
-    t.integer "user_id", null: false
+    t.bigint "user_id", null: false
     t.string "ip_address"
     t.string "user_agent"
     t.datetime "created_at", null: false
