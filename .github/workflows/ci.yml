@@ -85,18 +85,8 @@ jobs:
           }
           EOF
           sudo apparmor_parser -r /etc/apparmor.d/beskar-ci-chrome
-      - name: Verify Chrome starts before running browser tests
-        env:
-          BESKAR_BROWSER_BINARY: ${{ steps.chrome.outputs.chrome-path }}
-        run: |
-          mkdir -p tmp/browser
-          profile_dir=$(mktemp -d "$RUNNER_TEMP/beskar-chrome.XXXXXX")
-          timeout 30s "$BESKAR_BROWSER_BINARY" --headless --enable-logging=stderr \
-            --user-data-dir="$profile_dir" --dump-dom about:blank \
-            > tmp/browser/preflight.html 2> tmp/browser/chrome-stderr.log || {
-              cat tmp/browser/chrome-stderr.log
-              exit 1
-            }
+      # The suite verifies startup through Selenium. Chrome for Testing 153 can
+      # hang in standalone --dump-dom even when WebDriver sessions work normally.
       - name: Run dashboard browser regressions
         env:
           RAILS_ENV: test

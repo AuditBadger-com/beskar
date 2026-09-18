@@ -225,10 +225,12 @@ CI includes a separate Ubuntu 24.04 browser job with a
 [matching Chrome/driver setup](https://github.com/browser-actions/setup-chrome)
 and system dependencies. A per-binary AppArmor rule permits the downloaded
 Chrome to use its sandbox without disabling global user-namespace restrictions.
-A headless startup check runs before the suite. The `browser-diagnostics` artifact
-retains startup stderr, verbose driver logs, and failure screenshots for three days.
-The previous hosted run failed before session creation; this runner fix still
-needs hosted confirmation. Other browsers, full strict-style CSP,
+Startup is verified by the Selenium suite itself. The standalone `--dump-dom`
+preflight hung with Chrome for Testing 153.0.8010.52, reproduced locally even
+though all ten browser tests passed with that exact browser/driver pair.
+The `browser-diagnostics` artifact retains verbose driver logs (including Chrome
+startup diagnostics) and failure screenshots for three days. The updated hosted
+job still needs confirmation. Other browsers, full strict-style CSP,
 mobile/accessibility review, arbitrary host layouts/authentication integrations,
 Turbo Frames/Streams, and transactional stale-form protection remain unverified
 or out of scope for this batch. No new database migration is required for batch
