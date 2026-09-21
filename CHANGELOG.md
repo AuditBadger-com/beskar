@@ -9,7 +9,138 @@ upgrade requirements, use the [documentation index](docs/README.md) and
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
+
+## 0.2.0 - 2026-09-21
+
+Security hardening, coordinated enforcement, and auditable administration.
+This release includes breaking changes for 0.1.0 installations; read the
+[rollout checklist](docs/operations/security-hardening.md#rollout) before upgrading.
+
+### Breaking changes
+
+- Security state is now coordinated through the database, independently of the
+  `Rails.cache` backend. Apply the new state and administrative-history migrations
+  before starting upgraded workers. Users, sessions, and security state must share
+  the writer connection pool; old cache counters are not imported.
+- Dashboard authentication no longer grants administrative permissions by itself.
+  Configure `authorize_admin` separately for `:read`, `:manage_bans`, `:export`,
+  and `:read_audit`. Ban mutations and exports require a trusted `audit_actor`,
+  a reason, and successfully recorded administrative history.
+- Configuration is validated and sealed at startup. Invalid or unsupported
+  settings stop boot; direct runtime mutation is rejected. Runtime changes through
+  `Beskar.configure` require separate authorization, actor/reason/request context,
+  and an audit record. Runtime publication remains process-local.
+- Global authentication budgets and request-wide blocking for exhausted IP login
+  quotas now default off. Opt in with `global_attempts[:enabled]` and
+  `ip_attempts[:block_requests]` under `rate_limiting` if those policies are needed.
+  Notifications and automatic pattern analysis also default off and require
+  explicit host configuration when enabled.
+- Monitor-only mode records observations in separate state without automatically
+  creating IP bans, locking accounts, or resetting passwords. Review bans created
+  by older monitor-mode versions before enabling enforcement; existing bans are
+  not automatically removed.
+- Devise session and remember-cookie salts now include a durable revocation
+  generation, causing a one-time sign-out of existing credentials. Confirmed locks
+  revoke prior credentials regardless of `immediate_signout`; unlocking does not
+  restore them. Risk-based locking itself remains opt-in.
+- Rails-native authentication must use the admission, session-creation, and
+  session-resumption guards. OAuth, custom tokens, API controllers, and Action Cable
+  require the appropriate host integration; they are not automatically protected
+  merely by mounting the engine.
+- Deleting an account retains its security events unchanged, including their
+  original account identifiers. Security events and administrative history reject
+  ordinary model-level rewrites/deletes. This is not anonymization or protection
+  against privileged SQL/bulk updates; hosts still own retention policy.
+- Exports are bounded to 1,000 rows per cursor page and use filtered fields and
+  CSV formula-injection defenses. Scripted consumers must supply an audit reason
+  on every page and accommodate the revised export contract.
+
+### Added
+
+- Framework-neutral authentication admission, API and Action Cable session guards,
+  explicit session revocation, and persistent Rails-native account locks with
+  automatic or manual-only unlock policies.
+- An append-only administrative journal and read-only history dashboard for ban
+  changes, export preparation, and authorized runtime configuration changes, with
+  actor, reason, request/operation correlation, and filtered before/after state.
+- Opt-in post-commit notification delivery jobs with bounded retries, plus an
+  explicit host-job contract for background analysis. Password recovery remains
+  owned by the host application or Devise; no built-in analyzer or recovery-token
+  issuer is supplied.
+- Organized, gem-packaged guides and operational contracts under `docs/`, including
+  authentication coverage, deployment requirements, and remaining limitations.
+- Complete dashboard initializer examples for Rails built-in authentication and
+  Devise, including permission checks and audit identity. The Rails example checks
+  the signed session cookie and session revocation, with explicit instructions to
+  include `SecurityTrackableAuthenticable` in the host user model. Installation
+  guidance explains Devise's Warden scopes and the dashboard controller context.
+
+### Security and fixes
+
+- Enforce Devise password/HTTP Basic admission before credential verification;
+  coordinate IP/account limits and backoff across workers without double-counting
+  outcomes. Required enforcement-state failures deny access while optional audit
+  failures do not undo authentication decisions.
+- Honor monitor/whitelist policy for automatic enforcement and isolate observation
+  counters. Whitelisted attempts do not consume enforced global capacity.
+- Fix lost updates in rate-limit/WAF state, concurrent ban extensions, and mixed
+  administrative/automatic changes. MySQL locking reads prevent stale transaction
+  snapshots from overwriting ban updates or missing sessions during revocation;
+  native cleanup also ignores stale loaded associations and preserves callbacks.
+- Read ban decisions from the authoritative database, preserve permanent bans
+  during cleanup, normalize individual IP addresses, and reject invalid durations.
+  Administrative extensions no longer fabricate additional violations.
+- Retain security events after account deletion, tolerate missing accounts in
+  dashboards/exports, and make bulk administrative changes and their history
+  transactional. Failed or aborted persistence no longer reports success.
+- Bound and filter audit metadata, headers, identities, and error logging; use
+  Rails-resolved client IPs and consistent Rack 3 headers and retry deadlines.
+- Correct timestamped geographic risk history, impossible-travel calculations,
+  provider/cache isolation, and shared decision/audit evidence. Mock geography
+  cannot supply geographic risk evidence; repeated IP use and unlocks no longer
+  grant implicit trust discounts.
+- Narrow WAF exception scoring to relevant evidence by default, improve path
+  canonicalization and exclusions, and prevent duplicate charges for one request.
+- Fix dashboard reporting/search/pagination, UTC and DST-sensitive ban editing,
+  unchanged microsecond expiry preservation, persistent validation messages, and
+  nonce-based scripts. Native forms retain CSRF protection and work with JavaScript
+  disabled or host Turbo loaded.
+- Fix migration installation, MySQL JSON defaults and foreign-key types, Ruby 4
+  test dependencies, Chrome sandbox setup, and browser navigation synchronization.
+  CI covers Ruby 3.4/4.0, SQLite, PostgreSQL, MySQL, and Chromium system tests.
+
+### Removed
+
+- Nonfunctional versioned API routes and their helpers. Dashboard resource exports
+  remain available behind their dedicated permissions.
+- Claims of support for unimplemented capabilities: general SQL injection/XSS
+  filtering, JavaScript challenges, honeypots, and a built-in automatic pattern
+  analyzer. Unsupported custom lock strategies and geolocation providers are
+  rejected rather than silently accepted.
+
+### Upgrading from 0.1.0
+
+1. Copy and apply all engine migrations with `bin/rails beskar:install:migrations`
+   and `bin/rails db:migrate`, including the administrative-action target expansion.
+2. Configure administrative permissions, actor resolution, and reasons; review
+   [configuration](docs/guides/configuration.md) and
+   [audit lifecycle](docs/guides/audit-lifecycle.md) for the changed contracts.
+3. Adopt the [authentication guards](docs/guides/authentication.md), review all
+   credential entry points, and plan the one-time Devise sign-out. Legacy custom
+   tokens without a revocation generation must be rejected or reissued.
+4. Drain old workers and restart from the same reviewed configuration. Review
+   legacy bans and risk evidence in monitor mode before enforcing, and schedule
+   `bin/rails beskar:cleanup_security_state` to reclaim expired enforcement state.
+   This task does not purge audit events or account-lifetime revocation generations.
+5. Validate host recovery/delivery, shared-NAT behavior, and database load/failure
+   handling in staging. Cache independence does not remove database availability
+   requirements or establish production capacity guarantees.
+
+## 0.1.0 - 2025-11-25
+
+Historical notes carried forward from the 0.1.0 release. In particular, the
+monitor-mode ban creation described below is superseded by 0.2.0.
 
 ### ⚠️ BREAKING CHANGES
 
@@ -121,13 +252,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Clear warnings about development-only bypass patterns
 
 
-### Versioning Policy
+## Versioning policy
 
-- **Major version (X.0.0)**: Breaking changes that require code changes
-- **Minor version (0.X.0)**: New features, backward compatible
-- **Patch version (0.0.X)**: Bug fixes and minor improvements
+- Before 1.0, minor releases (0.X.0) may include explicitly documented breaking changes.
+- Patch releases (0.X.Y) contain backward-compatible fixes.
+- From 1.0 onward, breaking changes require a major version increment.
 
-### Upgrade Guide
+## Upgrade guide
 
 When upgrading between versions with breaking changes:
 
@@ -137,11 +268,7 @@ When upgrading between versions with breaking changes:
 4. Test in development/staging before deploying to production
 5. Start with `monitor_only = true` to verify behavior
 
-### Support
+## Support
 
-- GitHub Issues: https://github.com/humadroid-io/beskar/issues
-- Documentation: https://humadroid.io/beskar
-
----
-
-[Unreleased]: https://github.com/humadroid-io/beskar/compare/v0.0.2...HEAD
+- [GitHub issues](https://github.com/AuditBadger-com/beskar/issues)
+- [Documentation](docs/README.md)
