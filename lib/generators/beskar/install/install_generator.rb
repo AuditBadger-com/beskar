@@ -70,37 +70,28 @@ module Beskar
 
           2. Configure authentication for the dashboard in config/initializers/beskar.rb
 
-             For Devise users:
-             config.authenticate_admin = proc do |request|
-               request.env['warden']&.authenticate(scope: :admin).present?
-             end
+             Uncomment one complete example in the generated initializer:
+             - Rails built-in authentication: signed session_id cookie and Session model.
+             - Devise: Warden authentication with your app's Devise mapping scope.
 
-             For custom authentication:
-             config.authenticate_admin = proc do
-               current_user&.admin?
-             end
-
-             Separately grant dashboard permissions (missing grants deny access):
-             config.authorize_admin = proc do |request, permission|
-               admin = request.env['warden']&.user(scope: :admin)
-               admin && admin.beskar_permissions.include?(permission.to_s)
-             end
-             Adapt beskar_permissions to your host: read, manage_bans, export, read_audit.
-
-             Also configure a trusted audit_actor for dashboard writes and exports:
-             config.audit_actor = proc do |request|
-               admin = request.env['warden']&.user(scope: :admin)
-               "Admin:\#{admin.id}" if admin
-             end
-             Adapt the identity to your host authentication; see docs/guides/audit-lifecycle.md.
-             Without it, separately authorized reads work but writes/exports return 503.
+             Each example includes authenticate_admin, authorize_admin, and audit_actor.
+             Adapt admin? and beskar_permissions to your application's roles/policies.
+             Permissions: read, manage_bans, export, read_audit. Missing grants deny access.
+             Beskar's controller does not inherit your host authentication helpers.
+             See docs/guides/authentication.md and docs/guides/audit-lifecycle.md.
+             Without audit_actor, separately authorized reads work but writes/exports return 503.
 
           3. Add Beskar concerns to your User model (or authentication model):
 
+             For Rails built-in authentication:
+             class User < ApplicationRecord
+               include Beskar::Models::SecurityTrackableAuthenticable
+             end
+             Also integrate login admission and session guards from docs/guides/authentication.md.
+
+             For Devise:
              class User < ApplicationRecord
                include Beskar::Models::SecurityTrackable
-
-               # For Devise users, also add:
                include Beskar::Models::SecurityTrackableDevise
              end
 

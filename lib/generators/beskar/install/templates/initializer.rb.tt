@@ -12,13 +12,58 @@ Beskar.configure do |config|
   # (cookies, session, authenticate_or_request_with_http_basic, etc.).
   # The block should return truthy value to allow access, falsey to deny.
 
-  # Option 1: Using Devise with admin role (recommended for production)
+  # Choose one authentication option below. Options 1 and 2 include all three
+  # callbacks: authentication, permissions, and the operator recorded in audits.
+  # admin? and beskar_permissions are application-defined methods, not Rails or
+  # Devise defaults. Adapt them to your roles/policies. Permission names are:
+  # read, manage_bans, export, read_audit (beskar_permissions returns strings).
+  #
+  # Option 1: Rails built-in authentication (Rails 8 authentication generator)
+  # Beskar does not inherit your ApplicationController or Authentication concern,
+  # so Current.session/current_user may not be populated on dashboard requests.
+  # Resolve the host's Session from its signed cookie instead. Adapt the model
+  # and cookie name if you customized Rails' generated authentication.
+  # First add this to app/models/user.rb (not inside this initializer):
+  #   include Beskar::Models::SecurityTrackableAuthenticable
+  # This supplies beskar_access_allowed? for the revocation guard below.
+  # Beskar::Models::SecurityTrackable is Devise-specific and is not a substitute;
+  # without the native concern, the guard raises NoMethodError on the user.
+  # See docs/guides/authentication.md for the full integration.
+  # config.authenticate_admin = ->(request) do
+  #   @beskar_admin_user = nil
+  #   session_id = cookies.signed[:session_id]
+  #   auth_session = ::Session.find_by(id: session_id) if session_id
+  #   if Beskar::Services::SessionRevocation.native_session_allowed?(auth_session, request: request)
+  #     @beskar_admin_user = auth_session.user
+  #   end
+  #   @beskar_admin_user&.admin?
+  # end
+  # config.authorize_admin = ->(_request, permission) do
+  #   @beskar_admin_user&.admin? && @beskar_admin_user.beskar_permissions.include?(permission.to_s)
+  # end
+  # config.audit_actor = ->(_request) do
+  #   "User:#{@beskar_admin_user.id}" if @beskar_admin_user&.admin?
+  # end
+
+  # Option 2: Devise (Warden-backed; does not use the Rails Session model)
+  # :user is the Devise mapping scope, not a role. Change it to :admin only if
+  # your app has a separate Devise Admin model/mapping.
+  # authenticate resumes the Warden session or tries configured strategies
+  # (including remember-me); user reads the resulting authenticated identity.
   # config.authenticate_admin = ->(request) do
   #   user = request.env['warden']&.authenticate(scope: :user)
   #   user&.admin?
   # end
+  # config.authorize_admin = ->(request, permission) do
+  #   user = request.env['warden']&.user(scope: :user)
+  #   user&.admin? && user.beskar_permissions.include?(permission.to_s)
+  # end
+  # config.audit_actor = ->(request) do
+  #   user = request.env['warden']&.user(scope: :user)
+  #   "User:#{user.id}" if user&.admin?
+  # end
 
-  # Option 2: HTTP Basic Authentication (uses controller method)
+  # Option 3: HTTP Basic Authentication (uses controller method)
   # config.authenticate_admin = ->(request) do
   #   authenticate_or_request_with_http_basic("Beskar Admin") do |username, password|
   #     Beskar::Services::RequestContext.secure_match?(username, ENV['BESKAR_ADMIN_USERNAME']) &&
@@ -26,47 +71,40 @@ Beskar.configure do |config|
   #   end
   # end
 
-  # Option 3: Token-based authentication
+  # Option 4: Token-based authentication
   # config.authenticate_admin = ->(request) do
   #   token = ENV['BESKAR_ADMIN_TOKEN']
   #   token.present? && Beskar::Services::RequestContext.secure_match?(request.headers['Authorization'], "Bearer #{token}")
   # end
 
-  # Option 4: Cookie-based authentication (uses controller cookies)
+  # Option 5: Cookie-based authentication (uses controller cookies)
   # config.authenticate_admin = ->(request) do
   #   Beskar::Services::RequestContext.secure_match?(cookies.signed[:admin_token], ENV['BESKAR_ADMIN_TOKEN'])
   # end
 
-  # Option 5: Using CanCanCan (uses controller method)
+  # Option 6: Using CanCanCan (requires policy helpers on Beskar's controller)
   # config.authenticate_admin = ->(request) do
   #   authorize! :manage, :beskar_dashboard
   # end
 
-  # Option 6: Using Pundit (uses controller method)
+  # Option 7: Using Pundit (requires policy helpers on Beskar's controller)
   # config.authenticate_admin = ->(request) do
   #   authorize :beskar_dashboard, :access?
   # end
 
-  # Option 7: For development/testing ONLY (NOT for production!)
+  # Option 8: For development/testing ONLY (NOT for production!)
   # config.authenticate_admin = ->(request) do
   #   Rails.env.development? || Rails.env.test?
   # end
 
   # REQUIRED: grant permissions separately from authentication (nil denies all).
-  # config.authorize_admin = ->(request, permission) do
-  #   user = request.env['warden']&.user(scope: :user)
-  #   user&.admin? && user.beskar_permissions.include?(permission.to_s)
-  # end
-  # Adapt beskar_permissions to your host: read, manage_bans, export, read_audit.
+  # Options 1 and 2 show complete examples. For other options, supply your own
+  # authorize_admin callback returning true for each permitted operation.
 
   # REQUIRED FOR DASHBOARD WRITES AND EXPORTS: resolve an authenticated operator.
-  # Adapt this example to the same trusted identity used by authenticate_admin.
+  # Use the same trusted identity used by authenticate_admin (as above).
   # Never derive this from request params, emails, passwords, or tokens.
   # Without audit_actor, separately authorized reads work; writes/exports return 503.
-  # config.audit_actor = ->(request) do
-  #   user = request.env['warden']&.user(scope: :user)
-  #   "User:#{user.id}" if user&.admin?
-  # end
   # Forms require a reason and changes require transactional history.
   # Apply the administrative-action migration; see docs/guides/audit-lifecycle.md.
 

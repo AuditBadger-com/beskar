@@ -34,6 +34,11 @@ class InstallGeneratorTest < Rails::Generators::TestCase
       assert_match(/DASHBOARD AUTHENTICATION/, content)
       assert_match(/config\.authenticate_admin/, content)
       assert_match(/config\.audit_actor/, content)
+      assert_match(/Rails built-in authentication/, content)
+      assert_match(/::Session\.find_by\(id: session_id\)/, content)
+      assert_match(/cookies\.signed\[:session_id\]/, content)
+      assert_match(/SessionRevocation\.native_session_allowed\?/, content)
+      assert_match(/Warden-backed; does not use the Rails Session model/, content)
       assert_match(%r{docs/guides/audit-lifecycle\.md}, content)
 
       # Check for monitor_only mode configuration
