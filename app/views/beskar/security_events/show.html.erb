@@ -151,6 +151,10 @@
   </div>
 </div>
 
+<% if @event.event_type == "waf_violation" %>
+  <%= render "beskar/shared/waf_analysis", analysis: @event.metadata["waf_analysis"] %>
+<% end %>
+
 <!-- Metadata -->
 <% if @event.metadata.present? && @event.metadata.any? %>
   <div class="card">

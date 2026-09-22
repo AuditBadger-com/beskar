@@ -181,6 +181,10 @@
   </div>
 </div>
 
+<% if @banned_ip.reason == "waf_violation" %>
+  <%= render "beskar/shared/waf_analysis", analysis: @banned_ip.metadata["waf_analysis"], banned: true %>
+<% end %>
+
 <!-- Metadata -->
 <% if @banned_ip.metadata.present? && @banned_ip.metadata.any? %>
   <div class="card">
@@ -210,6 +214,7 @@
               <th>User</th>
               <th>Risk Score</th>
               <th>Details</th>
+              <th>Requested Path</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -254,6 +259,10 @@
                   <div style="font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                     <%= event.details || event.metadata&.dig("message") || "-" %>
                   </div>
+                </td>
+                <td style="font-family: monospace; font-size: 12px; overflow-wrap: anywhere; max-width: 300px;">
+                  <% analysis = event.metadata["waf_analysis"] %>
+                  <%= analysis.is_a?(Hash) ? analysis["request_path"].presence || "Not recorded" : "-" %>
                 </td>
                 <td>
                   <%= link_to "View", security_event_path(event), class: "btn btn-sm btn-secondary" %>

@@ -24,7 +24,7 @@ changes from open findings and production validation still required.
 - [Risk scoring](guides/risk-scoring.md) — factors, geographic evidence, and
   heuristic limitations.
 - [Audit data and WAF](guides/audit-and-waf.md) — filtering, exports, scanner
-  matching, and privacy boundaries.
+  matching, requested-path evidence, and privacy boundaries.
 - [Audit lifecycle](guides/audit-lifecycle.md) — unchanged event retention,
   administrative permissions, actor/reason history, and migrations.
 - [Dashboard and search](guides/dashboard-and-search.md) — reporting, search,

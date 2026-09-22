@@ -161,6 +161,37 @@ module Beskar
       assert_select ".card-title", text: /Top Threat IPs/i
     end
 
+    {"1h" => 1.hour, "6h" => 6.hours, "24h" => 24.hours, "7d" => 7.days, "30d" => 30.days}.each do |range, duration|
+      test "top threat rankings counts and risk only include the selected #{range} period" do
+        freeze_time do
+          start_time = Time.current - duration
+          # Both boundaries count; older events must not inflate this IP's rank or risk.
+          [start_time, Time.current].each do |timestamp|
+            create(:security_event, ip_address: "198.51.100.10", risk_score: 20, created_at: timestamp)
+          end
+          create_list(:security_event, 4, ip_address: "198.51.100.10", risk_score: 100, created_at: start_time - 1.second)
+          create_list(:security_event, 3, ip_address: "198.51.100.20", risk_score: 40, created_at: Time.current)
+          create_list(:security_event, 5, ip_address: "198.51.100.30", risk_score: 100, created_at: start_time - 1.second)
+          create_list(:security_event, 5, ip_address: "198.51.100.40", risk_score: 100, created_at: Time.current + 1.second)
+          # An IP with only one event in the period must not qualify through old activity.
+          create(:security_event, ip_address: "198.51.100.50", created_at: Time.current)
+          create(:security_event, ip_address: "198.51.100.50", created_at: start_time - 1.second)
+
+          get "/beskar/dashboard", params: {time_range: range}
+
+          assert_response :success
+          assert_select "#top-threat-ips" do |cards|
+            text = cards.first.text
+            assert_match(/198\.51\.100\.20\s+3 events\s+·\s+Avg risk: 40\.0/, text)
+            assert_match(/198\.51\.100\.10\s+2 events\s+·\s+Avg risk: 20\.0/, text)
+            assert_operator text.index("198.51.100.20"), :<, text.index("198.51.100.10")
+            %w[198.51.100.30 198.51.100.40 198.51.100.50].each { |ip| refute_includes text, ip }
+            assert_select ".card-subtitle", text: "Most active suspicious IPs in the selected period"
+          end
+        end
+      end
+    end
+
     test "displays event types distribution" do
       create(:security_event, event_type: "login_failure")
       create(:security_event, event_type: "login_failure")

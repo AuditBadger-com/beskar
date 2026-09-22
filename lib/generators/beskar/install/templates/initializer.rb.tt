@@ -143,8 +143,9 @@ Beskar.configure do |config|
   # config.waf[:request_exclusions] = [
   #   {path: %r{\A/wp-content/}, methods: ["GET", "HEAD"], categories: [:wordpress_static]}
   # ]
-  # WAF evidence excludes raw URLs and exception messages. Audit fields honor
-  # Rails filter_parameters. See docs/guides/audit-and-waf.md before opting into :all errors.
+  # WAF evidence retains bounded paths, excluding queries and exception messages.
+  # Audit fields honor Rails filter_parameters. See docs/guides/audit-and-waf.md
+  # before opting into :all errors.
   #
   # === Exponential Decay Configuration ===
   # Violations decay over time based on severity (reduces false positives)

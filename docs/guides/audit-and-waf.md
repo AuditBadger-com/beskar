@@ -11,10 +11,22 @@ historical. See [Repair status](../audits/repair-status.md) for remaining findin
 
 WAF matching uses request data transiently. Persisted WAF evidence contains rule
 IDs, static descriptions/categories, severity, rules version, decoding-pass count,
-an allowlisted HTTP method/exception class, timestamps, and scores. The event
-retains the Rails-resolved IP for attribution, subject to host audit filters.
-Raw/canonical paths, query strings, exception messages, and User-Agent headers are
-not copied into WAF events, ban metadata, state, or WAF messages. Public
+an allowlisted HTTP method/exception class, a bounded requested path, timestamps,
+and scores. The event retains the Rails-resolved IP for attribution, subject to
+host audit filters.
+Events and ban metadata retain `waf_analysis.request_path`: the requested path
+with its original percent encoding, limited to 1,024 characters with a trailing
+ellipsis when truncated. Queries and fragments are removed, invalid UTF-8 is
+repaired, controls are replaced, and host `request_path` filters apply. Event
+and ban details show this path beside the matched rules; the events list includes
+a Requested Path column, as do related events on ban details. Older records show
+"Not recorded" because discarded
+paths cannot be recovered. The ban's analysis identifies the triggering request,
+not every request contributing to the cumulative score.
+
+Canonical matching paths, query strings, exception messages, and User-Agent headers
+are not copied into WAF evidence. Paths remain excluded from enforcement state
+and WAF log messages. Public
 `record_violation` calls also project old-style analysis onto this bounded schema.
 The state API strips legacy raw-path/description fields on reads and on the next
 normal write; it does not bulk-rewrite historical database contents.
@@ -119,7 +131,8 @@ It does not parse request bodies or implement JavaScript challenges/honeypots.
   Ordinary `.well-known` routes are not scanner signatures.
 - Ignore arbitrary query text. Only a flat, exact `format` query key with an
   allowlisted executable value is checked; queries over 8,192 bytes are skipped.
-- Retain matched rule IDs with `rules_version: 1`, not the matching input.
+- Retain matched rule IDs with `rules_version: 1` and a bounded requested path,
+  without the decoded matching input or query values.
 
 Use narrow exclusions for legitimate host routes:
 

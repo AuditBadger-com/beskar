@@ -23,7 +23,7 @@ class WafInputContractTest < ActiveSupport::TestCase
       analysis = @waf.analyze_request(request(path))
       assert_equal :critical, analysis[:highest_severity], path
       assert_includes analysis[:patterns].map { |pattern| pattern[:category] }, :path_traversal
-      refute analysis.to_json.include?(path)
+      assert_equal path, analysis[:request_path]
     end
   end
 
@@ -75,13 +75,13 @@ class WafInputContractTest < ActiveSupport::TestCase
     assert_nil @waf.analyze_exception(error, request("/users/1.exe"))
   end
 
-  test "raw WAF URLs headers and old-style exception messages never reach sinks" do
+  test "WAF records requested paths but excludes queries headers and exception messages" do
     messages = []
     Beskar::Logger.stubs(:warn).with { |message, **|
       messages << message
       true
     }
-    analysis = @waf.analyze_request(request("/.env/SECRET_PATH", query: "token=SECRET_QUERY"))
+    analysis = @waf.analyze_request(request("/.env/config", query: "token=SECRET_QUERY"))
     analysis[:user_agent] = "SECRET_HEADER"
     analysis[:exception_message] = "SECRET_EXCEPTION"
     analysis[:patterns].first[:matched_path] = "/.env?token=SECRET_OLD_PATH"
@@ -93,7 +93,40 @@ class WafInputContractTest < ActiveSupport::TestCase
       refute_includes sink.to_json, "SECRET_"
     end
     assert_nil event.user_agent
+    assert_equal "/.env/config", event.metadata.dig("waf_analysis", "request_path")
+    assert_equal "/.env/config", ban.metadata.dig("waf_analysis", "request_path")
+    refute_includes state.data.to_json, "/.env/config"
+    refute_includes messages.to_json, "/.env/config"
     assert_equal "config_files:0", state.data["violations"].first["rule_id"]
+  end
+
+  test "public analysis paths are bounded cleaned and stripped of query and fragment" do
+    ["/.env?token=SECRET_QUERY", "/.env#SECRET_FRAGMENT"].each do |path|
+      analysis = @waf.analyze_request(request("/.env"))
+      analysis[:request_path] = path
+      @waf.record_violation(@ip, analysis)
+      assert_equal "/.env", Beskar::SecurityEvent.last.metadata.dig("waf_analysis", "request_path")
+    end
+    analysis = @waf.analyze_request(request("/.env/\xFF\n".b + "a" * 9000))
+    assert analysis[:request_path].valid_encoding?
+    refute_match(/[[:cntrl:]]/, analysis[:request_path])
+    assert_operator analysis[:request_path].length, :<=, 1024
+    assert analysis[:request_path].end_with?("...")
+  end
+
+  test "host path filters apply before WAF evidence is persisted" do
+    Rails.application.config.stubs(:filter_parameters).returns([:request_path])
+    analysis = @waf.analyze_request(request("/.env/private"))
+    assert_equal "[FILTERED]", analysis[:request_path]
+    @waf.record_violation(@ip, analysis)
+    assert_equal "[FILTERED]", Beskar::SecurityEvent.last.metadata.dig("waf_analysis", "request_path")
+    assert_equal "[FILTERED]", Beskar::BannedIp.last.metadata.dig("waf_analysis", "request_path")
+  end
+
+  test "exception analysis retains the path that raised the exception" do
+    analysis = @waf.analyze_exception(ActionController::UnknownFormat.new, request("/users/1.exe"))
+    @waf.record_violation(@ip, analysis)
+    assert_equal "/users/1.exe", Beskar::SecurityEvent.last.metadata.dig("waf_analysis", "request_path")
   end
 
   test "middleware charges one path violation even when the application raises" do

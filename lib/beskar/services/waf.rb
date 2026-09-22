@@ -213,7 +213,7 @@ module Beskar
         def analysis_for(request, input, patterns)
           {threat_detected: true, patterns: patterns, highest_severity: calculate_highest_severity(patterns),
            ip_address: RequestContext.ip(request), request_method: input.method, rules_version: RULES_VERSION,
-           decoding_passes: input.decoding_passes, timestamp: Time.current}
+           request_path: input.audit_path, decoding_passes: input.decoding_passes, timestamp: Time.current}
         end
 
         # A public caller may supply an old-style analysis containing raw URLs
@@ -241,6 +241,7 @@ module Beskar
           raise ArgumentError, "WAF analysis requires matched rules" if result[:patterns].empty?
           result[:exception_class] = analysis[:exception_class] if EXCEPTION_RULES.key?(analysis[:exception_class])
           result[:request_method] = analysis[:request_method] if %w[GET HEAD POST PUT PATCH DELETE OPTIONS CONNECT TRACE OTHER].include?(analysis[:request_method])
+          result[:request_path] = WafRequest.audit_path(analysis[:request_path]) if analysis[:request_path].is_a?(String)
           result
         end
 
@@ -383,6 +384,7 @@ module Beskar
               permanent: duration.nil?,
               details: "WAF score: #{current_score.round(2)} (#{violation_count} violations) - #{analysis_result[:patterns].map { |p| p[:description] }.join(", ")}",
               metadata: {
+                waf_analysis: analysis_result,
                 violation_count: violation_count,
                 risk_score: current_score.round(2),
                 patterns: analysis_result[:patterns],

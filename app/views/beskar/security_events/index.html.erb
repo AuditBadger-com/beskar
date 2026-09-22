@@ -125,6 +125,7 @@
             <th>ID</th>
             <th>Timestamp</th>
             <th>Event Type</th>
+            <th>Requested Path</th>
             <th>IP Address</th>
             <th>User</th>
             <th>Risk Score</th>
@@ -156,6 +157,14 @@
                   <div style="font-size: 11px; color: #697386;">
                     <%= event.event_type %>
                   </div>
+                </td>
+                <td data-request-path style="font-family: monospace; font-size: 12px; max-width: 300px; overflow-wrap: anywhere;">
+                  <% analysis = event.metadata["waf_analysis"] %>
+                  <% if event.event_type == "waf_violation" %>
+                    <%= analysis.is_a?(Hash) ? analysis["request_path"].presence || "Not recorded" : "Not recorded" %>
+                  <% else %>
+                    <%= event.metadata["request_path"].presence || "-" %>
+                  <% end %>
                 </td>
                 <td>
                   <div style="font-family: monospace; font-size: 13px;">
@@ -223,7 +232,7 @@
             <% end %>
           <% else %>
             <tr>
-              <td colspan="8" style="text-align: center; padding: 3rem;">
+              <td colspan="9" style="text-align: center; padding: 3rem;">
                 <div style="color: #697386;">
                   <svg width="48" height="48" fill="currentColor" viewBox="0 0 24 24" style="margin: 0 auto 1rem;">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>

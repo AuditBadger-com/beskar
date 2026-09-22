@@ -2,11 +2,21 @@ require "uri"
 
 module Beskar
   module Services
-    # Matching input only. Never copy these raw/canonical paths or query values
-    # into audit records, state, or logs; those contain rule identifiers instead.
+    # Canonical paths are for matching only. Audit paths preserve the requested
+    # encoding, are bounded and filtered, and exclude queries and fragments.
     class WafRequest
       MAX_BYTES = 8192
       attr_reader :path, :problem, :method, :decoding_passes
+
+      def self.audit_path(value)
+        return unless value.is_a?(String)
+        path = value.byteslice(0, 4096).b.split(/[?#]/, 2).first.to_s.force_encoding(Encoding::UTF_8)
+        AuditData.field(:request_path, path, limit: 1024)
+      end
+
+      def audit_path
+        self.class.audit_path(@request.path)
+      end
 
       def initialize(request)
         @request = request
