@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.2.1 - 2026-11-04
+
+Bug fixes for monitor mode and requests without a client address, plus
+requested-path evidence for WAF threats in the dashboard.
+
+### Changed
+
+- WAF events and ban metadata now retain `waf_analysis.request_path`: the
+  requested path with its original percent encoding, limited to 1,024 characters.
+  Queries and fragments are removed and host `request_path` filters apply. Event
+  and ban details show it beside the matched rules, and the events list has a
+  Requested Path column. Records created before this release show "Not recorded".
+- The dashboard overview labels top threat IPs as "in the selected period".
+
 ### Fixed
 
 - Monitor mode and whitelisted addresses no longer deny a login when one request

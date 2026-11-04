@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    beskar (0.2.0)
+    beskar (0.2.1)
       csv (~> 3.0)
       maxminddb (~> 0.1)
       rails (>= 8.0.0)
