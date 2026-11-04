@@ -6,6 +6,9 @@ module Beskar
     module RequestContext
       module_function
 
+      # Nil when the request has no usable address, for example an in-process Rack
+      # client with a blank REMOTE_ADDR. Rails falls back to REMOTE_ADDR when
+      # forwarded headers are invalid, so a remote client cannot cause this.
       def ip(request)
         value = if request.respond_to?(:remote_ip)
           request.remote_ip
@@ -15,6 +18,8 @@ module Beskar
           request.ip
         end
         IPAddr.new(value.to_s).to_s
+      rescue IPAddr::Error
+        nil
       end
 
       def text(value, limit: 500)

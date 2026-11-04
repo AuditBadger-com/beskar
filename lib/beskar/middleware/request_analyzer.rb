@@ -11,6 +11,12 @@ module Beskar
 
         Beskar::Logger.debug("[RequestAnalyzer] Processing request from IP: #{ip_address}", component: :Middleware)
 
+        # A request with no usable address has nothing to ban or score.
+        unless ip_address
+          processing_host = true
+          return @app.call(env)
+        end
+
         # 1. Check if IP is whitelisted (whitelisted IPs skip blocking but still get logged)
         is_whitelisted = Beskar::Services::IpWhitelist.whitelisted?(ip_address)
 
@@ -153,6 +159,8 @@ module Beskar
       end
 
       def handle_rails_exception(request, exception, ip_address, is_whitelisted)
+        return unless ip_address
+
         # Analyze the exception using WAF
         waf_analysis = Beskar::Services::Waf.analyze_exception(exception, request)
 
