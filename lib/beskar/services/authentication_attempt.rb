@@ -73,8 +73,15 @@ module Beskar
       # Charge that account once, independently of the already reserved IP tier.
       def bind_user!(resource)
         if user && user != resource
-          deny!(:identity_changed)
-          return
+          if RequestContext.enforce?(ip_address)
+            deny!(:identity_changed)
+            return
+          end
+          # Observation never denies a login: the second identity is recorded
+          # as a login of its own, with its own account count and audit event.
+          @user = nil
+          self.event = nil
+          self.completed = false
         end
         unless user
           @user = resource

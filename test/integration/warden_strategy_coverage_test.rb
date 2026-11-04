@@ -30,6 +30,16 @@ class WardenStrategyCoverageTest < ActiveSupport::TestCase
     refute second["test.verified"]
   end
 
+  test "an addressless custom strategy request reaches authentication" do
+    env = environment.merge("REMOTE_ADDR" => "", "test.user" => @user)
+    assert_nothing_raised { assert_equal 200, @manager.call(env).first }
+    assert env["test.verified"]
+  end
+
+  test "reserving no rate limit tiers is an allowed no-op" do
+    assert Beskar::Services::RateLimiter.send(:reserve, {})[:allowed]
+  end
+
   test "a credential-free request does not consume admission" do
     env = environment.merge("test.credentials_present" => false)
     assert_no_difference "Beskar::SecurityState.count" do

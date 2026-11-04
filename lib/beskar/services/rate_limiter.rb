@@ -95,6 +95,10 @@ module Beskar
         end
 
         def reserve(keys)
+          # No applicable tier (for example an addressless request with global
+          # limiting disabled): nothing to count, so admission is a no-op.
+          return most_restrictive_result([]) if keys.empty?
+
           configs = keys.to_h { |tier, _| [tier, config_for(tier)] }
           ttl = [configs.values.map { |config| config[:period].to_f }.max, BACKOFF_DELAYS.last].max + 60
           SecurityState.mutate(keys.values, ttl: ttl) do |state|

@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- Monitor mode and whitelisted addresses no longer deny a login when one request
+  sets a second user on a scope. Each user is recorded as a login of its own.
+  Enforcement still denies it as `identity_changed`.
+- A request with no usable client address no longer raises
+  `IPAddr::InvalidAddressError` in the middleware. `RequestContext.ip` returns nil,
+  and the middleware passes the request to the application without ban or WAF
+  checks. A login from such a request succeeds without an audit row. Logins
+  through non-password Warden strategies (such as OAuth) from such a request also
+  reach authentication; rate limiting with no applicable tier is now an allowed
+  no-op instead of raising `ArgumentError`.
+
 ## 0.2.0 - 2026-09-21
 
 Security hardening, coordinated enforcement, and auditable administration.
