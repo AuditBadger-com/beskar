@@ -20,7 +20,7 @@ gem "minitest", "~> 5.25"
 
 gem "devise"
 
-gem "bcrypt", "~> 3.1.7"
+gem "bcrypt", "~> 3.1.22"
 
 gem "debug"
 
